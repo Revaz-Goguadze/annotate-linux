@@ -59,6 +59,8 @@ pub struct Overlay {
     pub pool: SlotPool,
     /// ANNOTATE_PERF=1: rolling per-frame paint times (ms).
     perf: Option<Vec<f64>>,
+    /// ANNOTATE_FULL_DAMAGE=1: bypass the per-slot ledger, repaint fully.
+    force_full: bool,
     /// Pool byte length last frame; growth remaps the pool, which can move
     /// slot addresses and alias the per-slot ledger keys.
     pool_len: usize,
@@ -128,7 +130,9 @@ impl Overlay {
 
         let pool = SlotPool::new(4096, shm)?;
         let perf = std::env::var("ANNOTATE_PERF").is_ok_and(|v| v == "1").then(Vec::new);
+        let force_full = std::env::var("ANNOTATE_FULL_DAMAGE").is_ok_and(|v| v == "1");
         Ok(Self {
+            force_full,
             layer,
             pool,
             perf,
@@ -216,7 +220,10 @@ impl Overlay {
         let (buffer, canvas) = self.pool.create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888)?;
         let slot_key = canvas.as_ptr() as usize;
 
-        let rects = match self.damage.take(slot_key, surface_rect) {
+        let taken = self.damage.take(slot_key, surface_rect);
+        log::trace!("draw slot={slot_key:#x} owed={taken:?}");
+        let rects = match taken {
+            _ if self.force_full => vec![surface_rect],
             None => vec![surface_rect],
             Some(rs) if rs.is_empty() => {
                 // Nothing owed on this slot; skip the frame entirely.
@@ -337,14 +344,24 @@ impl Overlay {
         let surface = self.layer.wl_surface();
         if let Some(viewport) = &self.viewport {
             viewport.set_destination(self.width as i32, self.height as i32);
-        }
-        for r in &rects {
-            // Convert logical damage to buffer px with 1px slack per side.
-            let x = ((r.x * scale).floor() as i32 - 1).max(0);
-            let y = ((r.y * scale).floor() as i32 - 1).max(0);
-            let w = ((r.w * scale).ceil() as i32) + 2;
-            let h = ((r.h * scale).ceil() as i32) + 2;
-            surface.damage_buffer(x, y, w, h);
+            // Surface-local (logical) damage: the compositor's buffer→surface
+            // transform of damage_buffer at fractional scale drops regions on
+            // some compositors, leaving stale on-screen fragments. Logical
+            // damage is unambiguous under a viewport.
+            for r in &rects {
+                let x = (r.x.floor() as i32 - 1).max(0);
+                let y = (r.y.floor() as i32 - 1).max(0);
+                surface.damage(x, y, (r.w.ceil() as i32) + 2, (r.h.ceil() as i32) + 2);
+            }
+        } else {
+            for r in &rects {
+                // Integer-scale path: buffer-pixel damage with 1px slack.
+                let x = ((r.x * scale).floor() as i32 - 1).max(0);
+                let y = ((r.y * scale).floor() as i32 - 1).max(0);
+                let w = ((r.w * scale).ceil() as i32) + 2;
+                let h = ((r.h * scale).ceil() as i32) + 2;
+                surface.damage_buffer(x, y, w, h);
+            }
         }
         surface.frame(qh, surface.clone());
         buffer.attach_to(surface)?;
