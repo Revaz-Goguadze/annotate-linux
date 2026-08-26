@@ -13,6 +13,32 @@ use crate::util::xdg;
 pub struct Config {
     pub general: General,
     pub appearance: Appearance,
+    pub cursor: Cursor,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct Cursor {
+    /// default | none | outline | circle | crosshair
+    pub style: String,
+    /// Spotlight circle following the pointer
+    pub highlight: bool,
+    pub highlight_radius: f64,
+    /// Expanding ring on click
+    pub ripple: bool,
+    pub ripple_ms: u64,
+}
+
+impl Default for Cursor {
+    fn default() -> Self {
+        Self {
+            style: "default".into(),
+            highlight: false,
+            highlight_radius: 48.0,
+            ripple: false,
+            ripple_ms: 450,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

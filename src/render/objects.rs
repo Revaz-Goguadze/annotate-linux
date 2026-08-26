@@ -4,20 +4,26 @@
 use crate::model::arrow;
 use crate::model::object::{Object, ObjectKind};
 
-pub fn paint_object(cr: &cairo::Context, obj: &Object) {
+/// `alpha` is an extra multiplier (fade mode); 1.0 = fully opaque.
+pub fn paint_object(cr: &cairo::Context, obj: &Object, alpha: f64) {
+    if alpha <= 0.0 {
+        return;
+    }
     let s = &obj.style;
     cr.set_line_width(s.width);
     cr.set_line_cap(cairo::LineCap::Round);
     cr.set_line_join(cairo::LineJoin::Round);
 
-    if s.group_alpha < 1.0 {
+    let group_alpha = s.group_alpha * alpha;
+    if group_alpha < 1.0 {
         // Composite the whole object as a group so a self-crossing
-        // highlighter stroke doesn't double-darken at intersections.
+        // highlighter stroke doesn't double-darken at intersections; the
+        // same path applies fade alpha per object.
         cr.push_group();
         cr.set_source_rgba(s.stroke.r, s.stroke.g, s.stroke.b, s.stroke.a);
         paint_kind(cr, obj);
         cr.pop_group_to_source().expect("pop group");
-        cr.paint_with_alpha(s.group_alpha).expect("paint group");
+        cr.paint_with_alpha(group_alpha).expect("paint group");
     } else {
         cr.set_source_rgba(s.stroke.r, s.stroke.g, s.stroke.b, s.stroke.a);
         paint_kind(cr, obj);

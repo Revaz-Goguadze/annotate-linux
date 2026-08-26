@@ -4,6 +4,7 @@
 pub mod arrow;
 pub mod constraints;
 pub mod edit;
+pub mod fade;
 pub mod geom;
 pub mod object;
 pub mod scene;

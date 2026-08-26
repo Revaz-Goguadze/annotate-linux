@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use calloop::timer::{TimeoutAction, Timer};
 use calloop::{LoopHandle, LoopSignal};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -34,7 +35,9 @@ use super::scaling::ScalingState;
 use super::surface::{FrameCtx, Overlay};
 use crate::config::Config;
 use crate::input::{Action, Drag, DragUpdate, InputState, Tool, keymap, text_edit};
+use crate::model::fade;
 use crate::render::board::BoardKind;
+use crate::render::cursor_fx::{CursorFx, CursorStyle};
 use crate::render::ui::{self, UiButton, UiHit, UiState, paint::UiPaintCtx};
 use crate::ipc::protocol::{Command, Response, StatusPayload};
 use crate::model::constraints::Mods;
@@ -55,9 +58,12 @@ const HIGHLIGHTER_WIDTH_FACTOR: f64 = 3.0;
 pub enum Mode {
     Hidden,
     Interactive,
+    /// Always-on: annotations visible, all input passes through.
+    Passthrough,
 }
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const TICK: Duration = Duration::from_millis(33);
 
 /// An open text entry (new or double-click edit). Not yet in the scene.
 struct TextDraft {
@@ -138,6 +144,18 @@ pub struct AppState {
     marquee: Option<(u32, Point, Point)>,
     /// Eraser sweep: (output, last sample point, removals in order).
     erase: Option<(u32, Point, Vec<(usize, Object)>)>,
+
+    // fade mode
+    fade_enabled: bool,
+    fade_seconds: f64,
+    fade_timer: bool,
+    // cursor fx
+    cursor_style: CursorStyle,
+    cursor_highlight: bool,
+    pointer_pos: Option<(u32, Point)>,
+    /// Live click ripples: (output, center, started).
+    ripples: Vec<(u32, Point, Instant)>,
+    fx_timer: bool,
     pub loop_handle: LoopHandle<'static, AppState>,
     debug_damage: bool,
 }
@@ -158,6 +176,10 @@ impl AppState {
             .collect();
         let palette = if palette.is_empty() { vec![Rgba::new(0.9, 0.2, 0.2, 1.0)] } else { palette };
         let board_opacity = config.appearance.board_opacity.clamp(0.1, 1.0);
+        let fade_enabled = config.general.fade_default;
+        let fade_seconds = config.general.fade_seconds;
+        let cursor_style = CursorStyle::from_name(&config.cursor.style).unwrap_or_default();
+        let cursor_highlight = config.cursor.highlight;
         Ok(Self {
             registry_state: RegistryState::new(globals),
             seat_state: SeatState::new(globals, qh),
@@ -195,6 +217,14 @@ impl AppState {
             clipboard: Vec::new(),
             marquee: None,
             erase: None,
+            fade_enabled,
+            fade_seconds,
+            fade_timer: false,
+            cursor_style,
+            cursor_highlight,
+            pointer_pos: None,
+            ripples: Vec::new(),
+            fx_timer: false,
             loop_handle,
             debug_damage: std::env::var("ANNOTATE_DEBUG_DAMAGE").is_ok_and(|v| v == "1"),
         })
@@ -278,7 +308,7 @@ impl AppState {
     pub fn toggle(&mut self) -> Result<()> {
         match self.mode {
             Mode::Hidden => self.show(),
-            Mode::Interactive => {
+            Mode::Interactive | Mode::Passthrough => {
                 self.hide();
                 Ok(())
             }
@@ -325,6 +355,7 @@ impl AppState {
             let obj = Object::new(id, kind, style);
             let at = scene.len();
             self.undo.commit(key as u64, Edit::Insert { at, obj }, scene);
+            self.ensure_fade_timer();
         }
     }
 
@@ -362,6 +393,173 @@ impl AppState {
         if self.board != kind {
             self.board = kind;
             self.damage_all();
+        }
+    }
+
+    /// Arm the ~30 Hz fade tick if fade mode is on and anything exists.
+    fn ensure_fade_timer(&mut self) {
+        if self.fade_timer || !self.fade_enabled {
+            return;
+        }
+        if self.scenes.values().all(|s| s.is_empty()) {
+            return;
+        }
+        self.fade_timer = true;
+        let _ = self
+            .loop_handle
+            .insert_source(Timer::from_duration(TICK), |_, _, state: &mut AppState| {
+                state.on_fade_tick()
+            });
+    }
+
+    fn on_fade_tick(&mut self) -> TimeoutAction {
+        if !self.fade_enabled {
+            self.fade_timer = false;
+            return TimeoutAction::Drop;
+        }
+        let now = Instant::now();
+        let hold = self.fade_seconds;
+        let keys: Vec<u64> = self.scenes.keys().copied().collect();
+        let mut any_objects = false;
+        for k in keys {
+            let scene = self.scenes.get_mut(&k).expect("listed key");
+            let mut damage: Vec<Rect> = Vec::new();
+            let mut gc: Vec<usize> = Vec::new();
+            for (i, o) in scene.objects.iter().enumerate() {
+                let age = now.duration_since(o.born).as_secs_f64();
+                if fade::is_fading(age, hold) {
+                    damage.push(o.bounds);
+                }
+                if fade::gc_due(age, hold) {
+                    gc.push(i);
+                }
+            }
+            if !gc.is_empty() {
+                for &i in gc.iter().rev() {
+                    let o = scene.objects.remove(i);
+                    damage.push(o.bounds);
+                }
+                // Index-based undo entries are invalid after gc; dropping the
+                // history is what guarantees undo never resurrects a faded
+                // ghost.
+                log::debug!("fade gc: removed {} object(s) on key {k}, dropping undo history", gc.len());
+                self.undo.forget_key(k);
+                if let Some((sk, _)) = &self.selection {
+                    if *sk as u64 == k {
+                        self.selection = None;
+                    }
+                }
+            }
+            any_objects |= !self.scenes[&k].objects.is_empty();
+            if !damage.is_empty() {
+                self.record_damage(k as u32, &damage);
+            }
+        }
+        if any_objects {
+            TimeoutAction::ToDuration(TICK)
+        } else {
+            self.fade_timer = false;
+            TimeoutAction::Drop
+        }
+    }
+
+    fn ensure_fx_timer(&mut self) {
+        if self.fx_timer || self.ripples.is_empty() {
+            return;
+        }
+        self.fx_timer = true;
+        let _ = self
+            .loop_handle
+            .insert_source(Timer::from_duration(TICK), |_, _, state: &mut AppState| {
+                state.on_fx_tick()
+            });
+    }
+
+    fn on_fx_tick(&mut self) -> TimeoutAction {
+        let ttl = Duration::from_millis(self.config.cursor.ripple_ms.max(50));
+        let now = Instant::now();
+        let expired: Vec<_> = self
+            .ripples
+            .iter()
+            .filter(|(_, _, t0)| now.duration_since(*t0) >= ttl)
+            .cloned()
+            .collect();
+        self.ripples.retain(|(_, _, t0)| now.duration_since(*t0) < ttl);
+        let damages: Vec<(u32, Rect)> = self
+            .ripples
+            .iter()
+            .map(|(k, at, _)| (*k, crate::render::cursor_fx::ripple_bounds(*at)))
+            .chain(expired.iter().map(|(k, at, _)| (*k, crate::render::cursor_fx::ripple_bounds(*at))))
+            .collect();
+        for (k, r) in damages {
+            self.record_damage(k, &[r]);
+        }
+        if self.ripples.is_empty() {
+            self.fx_timer = false;
+            TimeoutAction::Drop
+        } else {
+            TimeoutAction::ToDuration(TICK)
+        }
+    }
+
+    /// Enter/leave click-through mode. Recovery from passthrough is IPC
+    /// only (`annotate-linux passthrough off`) — the surface takes no input.
+    pub fn set_passthrough(&mut self, on: bool) -> Result<()> {
+        if on {
+            if self.mode == Mode::Hidden {
+                self.show()?;
+            }
+            self.commit_text_draft();
+            self.obj_move = None;
+            self.marquee = None;
+            self.erase = None;
+            self.input.drag = Drag::Idle;
+            self.active_drag = None;
+            for oo in self.overlays.values() {
+                oo.overlay.set_passthrough(&self.compositor_state, true, KeyboardInteractivity::None)?;
+            }
+            self.mode = Mode::Passthrough;
+            log::info!("passthrough on");
+        } else if self.mode == Mode::Passthrough {
+            let ki = self.keyboard_interactivity();
+            for oo in self.overlays.values() {
+                oo.overlay.set_passthrough(&self.compositor_state, false, ki)?;
+            }
+            self.mode = Mode::Interactive;
+            log::info!("passthrough off");
+        }
+        Ok(())
+    }
+
+    fn cursor_fx_active(&self) -> bool {
+        self.cursor_highlight || self.cursor_style.hides_system_cursor()
+    }
+
+    fn cursor_fx_for(&self, key: u32) -> Option<CursorFx> {
+        let (pk, pos) = self.pointer_pos?;
+        if pk != key || !self.cursor_fx_active() {
+            return None;
+        }
+        Some(CursorFx {
+            pos,
+            style: self.cursor_style,
+            highlight: self.cursor_highlight,
+            highlight_radius: self.config.cursor.highlight_radius,
+            color: self.palette[self.color_idx],
+        })
+    }
+
+    fn damage_cursor(&mut self, key: u32, old: Option<Point>, new: Option<Point>) {
+        if !self.cursor_fx_active() {
+            return;
+        }
+        let r = self.config.cursor.highlight_radius.max(16.0) + 4.0;
+        let mut damage = Rect::default();
+        for p in [old, new].into_iter().flatten() {
+            damage = damage.union(Rect::new(p.x - r, p.y - r, 2.0 * r, 2.0 * r));
+        }
+        if !damage.is_empty() {
+            self.record_damage(key, &[damage]);
         }
     }
 
@@ -405,6 +603,7 @@ impl AppState {
             }
         }
         self.record_damage(d.key, &[obj_bounds]);
+        self.ensure_fade_timer();
     }
 
     /// Keystroke routed into the open draft. Returns true when consumed.
@@ -498,6 +697,7 @@ impl AppState {
         let at = scene.len();
         self.undo.commit(key as u64, Edit::Insert { at, obj }, scene);
         self.record_damage(key, &[bounds]);
+        self.ensure_fade_timer();
     }
 
     fn handle_move_motion(&mut self, surface_key: u32, pos: Point) -> bool {
@@ -714,6 +914,7 @@ impl AppState {
         self.selection = Some((key, new_ids));
         self.record_damage(key, &[damage.inflate(4.0)]);
         self.selection_damage();
+        self.ensure_fade_timer();
     }
 
     pub fn dispatch(&mut self, action: Action) {
@@ -731,8 +932,12 @@ impl AppState {
             }
             Action::Undo => {
                 let scenes = &mut self.scenes;
-                if let Some(key) = self.undo.undo(|k| scenes.get_mut(&k)) {
-                    self.damage_key(key as u32);
+                match self.undo.undo(|k| scenes.get_mut(&k)) {
+                    Some(key) => {
+                        log::debug!("undo applied on key {key}");
+                        self.damage_key(key as u32);
+                    }
+                    None => log::debug!("undo: empty stack"),
                 }
             }
             Action::Redo => {
@@ -870,6 +1075,16 @@ impl AppState {
             .and_then(|k| self.ui_layout_on(k).map(|l| (k, l)))
             .into_iter()
             .collect();
+        let now = Instant::now();
+        let fade_hold = self.fade_enabled.then_some(self.fade_seconds);
+        let ripple_ttl = self.config.cursor.ripple_ms.max(50) as f64 / 1000.0;
+        let all_ripples: Vec<(u32, Point, f64)> = self
+            .ripples
+            .iter()
+            .map(|(k, at, t0)| (*k, *at, (now.duration_since(*t0).as_secs_f64() / ripple_ttl).min(1.0)))
+            .collect();
+        let cursor_fx: Option<(u32, CursorFx)> =
+            self.pointer_pos.and_then(|(k, _)| self.cursor_fx_for(k).map(|f| (k, f)));
         for (key, oo) in &mut self.overlays {
             let o = &mut oo.overlay;
             if o.configured && o.dirty && !o.frame_pending {
@@ -883,6 +1098,15 @@ impl AppState {
                     .marquee
                     .filter(|(mk, _, _)| mk == key)
                     .map(|(_, a, b)| Rect::from_corners(a, b));
+                let ripples: Vec<(Point, f64)> = all_ripples
+                    .iter()
+                    .filter(|(rk, _, _)| rk == key)
+                    .map(|(_, at, t)| (*at, *t))
+                    .collect();
+                let cursor = match &cursor_fx {
+                    Some((ck, fx)) if ck == key => Some(CursorFx { ..*fx }),
+                    _ => None,
+                };
                 let selection: Vec<Rect> = match &self.selection {
                     Some((sk, ids)) if sk == key => ids
                         .iter()
@@ -896,6 +1120,10 @@ impl AppState {
                     caret,
                     marquee,
                     selection,
+                    fade_hold,
+                    now,
+                    cursor,
+                    ripples,
                     board: self.board,
                     board_opacity: self.board_opacity,
                     ui: ui_layouts.get(key).map(|layout| {
@@ -956,6 +1184,35 @@ impl AppState {
                 self.hide();
                 Ok(())
             }
+            Command::Passthrough { on } => {
+                let target = on.unwrap_or(self.mode != Mode::Passthrough);
+                self.set_passthrough(target)
+            }
+            Command::Mode { fade, seconds } => (|| {
+                if let Some(s) = seconds {
+                    anyhow::ensure!(s > 0.0, "seconds must be positive");
+                    self.fade_seconds = s;
+                }
+                if let Some(f) = fade {
+                    self.fade_enabled = f;
+                    if f {
+                        self.ensure_fade_timer();
+                    }
+                    self.damage_all();
+                }
+                Ok(())
+            })(),
+            Command::Cursor { style, highlight } => (|| {
+                if let Some(s) = style {
+                    self.cursor_style = CursorStyle::from_name(&s)
+                        .ok_or_else(|| anyhow::anyhow!("unknown cursor style {s:?}"))?;
+                }
+                if let Some(h) = highlight {
+                    self.cursor_highlight = h;
+                }
+                self.damage_all();
+                Ok(())
+            })(),
             Command::Clear => {
                 self.dispatch(Action::Clear);
                 Ok(())
@@ -999,6 +1256,7 @@ impl AppState {
                     mode: match self.mode {
                         Mode::Hidden => "hidden".into(),
                         Mode::Interactive => "interactive".into(),
+                        Mode::Passthrough => "passthrough".into(),
                     },
                     tool: self.input.tool.name().into(),
                     color: self.palette[self.color_idx].to_hex(),
@@ -1240,11 +1498,29 @@ impl PointerHandler for AppState {
             let pos = Point::new(event.position.0, event.position.1);
             let style = self.current_style();
             let (key, update) = match event.kind {
-                Enter { .. } => {
+                Enter { serial } => {
                     self.focused_output = Some(surface_key);
+                    if self.cursor_style.hides_system_cursor() {
+                        if let Some(p) = &self.pointer {
+                            p.set_cursor(serial, None, 0, 0);
+                        }
+                    }
+                    self.pointer_pos = Some((surface_key, pos));
+                    self.damage_cursor(surface_key, None, Some(pos));
+                    continue;
+                }
+                Leave { .. } => {
+                    if let Some((k, p)) = self.pointer_pos.take() {
+                        self.damage_cursor(k, Some(p), None);
+                    }
                     continue;
                 }
                 Press { button: BTN_LEFT, .. } => {
+                    if self.config.cursor.ripple {
+                        self.ripples.push((surface_key, pos, Instant::now()));
+                        self.record_damage(surface_key, &[crate::render::cursor_fx::ripple_bounds(pos)]);
+                        self.ensure_fx_timer();
+                    }
                     if self.handle_ui_press(surface_key, pos) {
                         continue;
                     }
@@ -1272,6 +1548,8 @@ impl PointerHandler for AppState {
                     (surface_key, self.input.on_press(pos, &style))
                 }
                 Motion { .. } => {
+                    let old = self.pointer_pos.replace((surface_key, pos)).map(|(_, p)| p);
+                    self.damage_cursor(surface_key, old, Some(pos));
                     if self.handle_move_motion(surface_key, pos) {
                         continue;
                     }

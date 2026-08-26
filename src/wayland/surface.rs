@@ -23,7 +23,9 @@ use super::state::AppState;
 use crate::model::geom::Rect;
 use crate::model::object::Object;
 use crate::model::scene::Scene;
+use crate::model::fade;
 use crate::render::board::{self, BoardKind};
+use crate::render::cursor_fx::{self, CursorFx};
 use crate::render::damage::DamageTracker;
 use crate::render::objects::paint_object;
 use crate::render::ui::{self, UiLayout, paint::UiPaintCtx};
@@ -40,6 +42,13 @@ pub struct FrameCtx<'a> {
     pub marquee: Option<Rect>,
     /// Bounds of selected objects on this output (dashed highlight).
     pub selection: Vec<Rect>,
+    /// Fade-mode hold seconds; None = persist (full alpha).
+    pub fade_hold: Option<f64>,
+    pub now: std::time::Instant,
+    /// Cursor glyph/spotlight on this output.
+    pub cursor: Option<CursorFx>,
+    /// Click ripples on this output: (center, progress 0..1).
+    pub ripples: Vec<(crate::model::geom::Point, f64)>,
     /// Present only on the output that shows the toolbar.
     pub ui: Option<(&'a UiLayout, UiPaintCtx<'a>)>,
     pub debug_damage: bool,
@@ -148,6 +157,28 @@ impl Overlay {
         }
     }
 
+    /// Click-through: empty input region + no keyboard. `ki` restores the
+    /// configured interactivity when turning passthrough off. The wl_region
+    /// is copied server-side at set time, so dropping it after is safe.
+    pub fn set_passthrough(
+        &self,
+        compositor: &CompositorState,
+        on: bool,
+        ki: KeyboardInteractivity,
+    ) -> Result<()> {
+        let surface = self.layer.wl_surface();
+        if on {
+            let region = smithay_client_toolkit::compositor::Region::new(compositor)?;
+            surface.set_input_region(Some(region.wl_region()));
+            self.layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        } else {
+            surface.set_input_region(None);
+            self.layer.set_keyboard_interactivity(ki);
+        }
+        surface.commit();
+        Ok(())
+    }
+
     /// Apply a new logical size from the layer configure.
     pub fn set_size(&mut self, w: u32, h: u32) {
         if w > 0 && h > 0 && (w != self.width || h != self.height) {
@@ -198,15 +229,32 @@ impl Overlay {
 
             for obj in &ctx.scene.objects {
                 if rects.iter().any(|r| r.intersects(obj.bounds)) {
-                    paint_object(cr, obj);
+                    let alpha = match ctx.fade_hold {
+                        Some(hold) => {
+                            fade::alpha(ctx.now.duration_since(obj.born).as_secs_f64(), hold)
+                        }
+                        None => 1.0,
+                    };
+                    paint_object(cr, obj, alpha);
                 }
             }
             if let Some(p) = ctx.preview {
                 if rects.iter().any(|r| r.intersects(p.bounds)) {
-                    paint_object(cr, p);
+                    paint_object(cr, p, 1.0);
                     if ctx.caret {
                         crate::render::text::paint_caret(cr, p);
                     }
+                }
+            }
+
+            for (at, t) in &ctx.ripples {
+                if rects.iter().any(|r| r.intersects(cursor_fx::ripple_bounds(*at))) {
+                    cursor_fx::paint_ripple(cr, *at, *t, crate::util::color::Rgba::new(1.0, 0.85, 0.2, 1.0));
+                }
+            }
+            if let Some(fx) = &ctx.cursor {
+                if rects.iter().any(|r| r.intersects(fx.bounds())) {
+                    cursor_fx::paint_cursor(cr, fx);
                 }
             }
 

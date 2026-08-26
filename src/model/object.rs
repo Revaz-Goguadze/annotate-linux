@@ -57,12 +57,14 @@ pub struct Object {
     pub style: Style,
     /// Cached extent incl. stroke width + arrowhead + AA margin.
     pub bounds: Rect,
+    /// Creation time (fade-mode clock).
+    pub born: std::time::Instant,
 }
 
 impl Object {
     pub fn new(id: ObjectId, kind: ObjectKind, style: Style) -> Self {
         let bounds = bounds_of(&kind, &style);
-        Self { id, kind, style, bounds }
+        Self { id, kind, style, bounds, born: std::time::Instant::now() }
     }
 
     pub fn recompute_bounds(&mut self) {
