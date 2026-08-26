@@ -370,6 +370,7 @@ impl AppState {
     }
 
     fn record_damage(&mut self, key: u32, rects: &[Rect]) {
+        log::trace!("record key={key} rects={rects:?}");
         if let Some(oo) = self.overlays.get_mut(&key) {
             for r in rects {
                 oo.overlay.damage.record(*r);
@@ -381,6 +382,7 @@ impl AppState {
     }
 
     fn apply_drag_update(&mut self, key: u32, update: DragUpdate) {
+        log::trace!("drag={:?} damage={:?}", std::mem::discriminant(&self.input.drag), update.damage);
         self.record_damage(key, &update.damage);
         if let Some(kind) = update.committed {
             let style = self.current_style();
@@ -1615,6 +1617,7 @@ impl PointerHandler for AppState {
                     continue;
                 }
                 Press { button: BTN_LEFT, .. } => {
+                    log::trace!("press tool={:?} pos={pos:?} width={}", self.input.tool, self.width);
                     if self.config.cursor.ripple {
                         self.ripples.push((surface_key, pos, Instant::now()));
                         self.record_damage(surface_key, &[crate::render::cursor_fx::ripple_bounds(pos)]);

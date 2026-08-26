@@ -166,6 +166,25 @@ mod tests {
     }
 
     #[test]
+    fn arrow_bounds_contain_head_barbs() {
+        // Near-horizontal arrow: barbs stick out several px above/below the
+        // a-b bbox; bounds must contain every head point (regression: the
+        // zero-rect union dropped them → orphan head shards on screen).
+        let a = Point::new(0.0, 0.0);
+        let b = Point::new(100.0, 6.0);
+        let o = Object::new(ObjectId(1), ObjectKind::Arrow { a, b }, style(6.0));
+        for p in crate::model::arrow::head_points(a, b, 6.0) {
+            assert!(
+                o.bounds.contains(p),
+                "barb {p:?} outside bounds {:?}",
+                o.bounds
+            );
+        }
+        // and the bounds must be strictly taller than the bare a-b box
+        assert!(o.bounds.h > (b.y - a.y) + 6.0 + 4.0);
+    }
+
+    #[test]
     fn translate_moves_bounds() {
         let mut o = Object::new(
             ObjectId(1),
@@ -185,9 +204,12 @@ fn bounds_of(kind: &ObjectKind, style: &Style) -> Rect {
         ObjectKind::Freehand { pts } => Rect::from_points(pts),
         ObjectKind::Line { a, b } => Rect::from_corners(*a, *b),
         ObjectKind::Arrow { a, b } => {
+            // NB: barbs must extend the bounds via include_point — a
+            // zero-sized rect is "empty" and union() would drop it, which
+            // left arrowheads outside their own damage bounds.
             let mut r = Rect::from_corners(*a, *b);
             for p in arrow::head_points(*a, *b, style.width) {
-                r = r.union(Rect::new(p.x, p.y, 0.0, 0.0));
+                r = r.include_point(p);
             }
             r
         }

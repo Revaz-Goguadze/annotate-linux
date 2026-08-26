@@ -61,6 +61,10 @@ pub struct Overlay {
     perf: Option<Vec<f64>>,
     /// ANNOTATE_FULL_DAMAGE=1: bypass the per-slot ledger, repaint fully.
     force_full: bool,
+    /// ANNOTATE_CHECK=1: render a full reference every frame and byte-compare
+    /// against the incremental canvas; log divergence (debug harness).
+    check: bool,
+    frame_no: u64,
     /// Pool byte length last frame; growth remaps the pool, which can move
     /// slot addresses and alias the per-slot ledger keys.
     pool_len: usize,
@@ -131,8 +135,11 @@ impl Overlay {
         let pool = SlotPool::new(4096, shm)?;
         let perf = std::env::var("ANNOTATE_PERF").is_ok_and(|v| v == "1").then(Vec::new);
         let force_full = std::env::var("ANNOTATE_FULL_DAMAGE").is_ok_and(|v| v == "1");
+        let check = std::env::var("ANNOTATE_CHECK").is_ok_and(|v| v == "1");
         Ok(Self {
             force_full,
+            check,
+            frame_no: 0,
             layer,
             pool,
             perf,
@@ -248,7 +255,7 @@ impl Overlay {
             .collect();
 
         let t0 = std::time::Instant::now();
-        with_cairo(canvas, bw, bh, |cr| {
+        with_cairo(&mut *canvas, bw, bh, |cr| {
             // All drawing below happens in logical px.
             cr.scale(scale, scale);
             for r in &rects {
@@ -326,6 +333,86 @@ impl Overlay {
                 cr.stroke().expect("debug rects");
             }
         })?;
+
+        self.frame_no += 1;
+        if self.check {
+            // Full-reference render into scratch memory, then byte-compare.
+            let mut reference = vec![0u8; (bw * bh * 4) as usize];
+            with_cairo(&mut reference, bw, bh, |cr| {
+                cr.scale(scale, scale);
+                cr.set_operator(cairo::Operator::Source);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
+                cr.paint().expect("clear");
+                cr.set_operator(cairo::Operator::Over);
+                board::paint(cr, ctx.board, ctx.board_opacity);
+                for obj in &ctx.scene.objects {
+                    let alpha = match ctx.fade_hold {
+                        Some(hold) => fade::alpha(ctx.now.duration_since(obj.born).as_secs_f64(), hold),
+                        None => 1.0,
+                    };
+                    paint_object(cr, obj, alpha);
+                }
+                if let Some(p) = ctx.preview {
+                    paint_object(cr, p, 1.0);
+                    if ctx.caret {
+                        crate::render::text::paint_caret(cr, p);
+                    }
+                }
+                if !ctx.selection.is_empty() || ctx.marquee.is_some() {
+                    cr.set_source_rgba(0.45, 0.65, 0.95, 0.95);
+                    cr.set_line_width(1.5);
+                    cr.set_dash(&[6.0, 4.0], 0.0);
+                    for r in &ctx.selection {
+                        cr.rectangle(r.x, r.y, r.w, r.h);
+                    }
+                    if let Some(m) = &ctx.marquee {
+                        cr.rectangle(m.x, m.y, m.w, m.h);
+                    }
+                    cr.stroke().expect("dashed");
+                    cr.set_dash(&[], 0.0);
+                }
+                if let Some((layout, paint_ctx)) = &ctx.ui {
+                    ui::paint::paint(cr, layout, paint_ctx);
+                }
+            })?;
+            // canvas was borrowed by the earlier with_cairo; re-fetch bytes via
+            // a fresh comparison against the reference
+            let stride = (bw * 4) as usize;
+            let mut min_x = i32::MAX;
+            let mut min_y = i32::MAX;
+            let mut max_x = -1;
+            let mut max_y = -1;
+            for y in 0..bh as usize {
+                let a = &canvas[y * stride..(y + 1) * stride];
+                let b = &reference[y * stride..(y + 1) * stride];
+                if a != b {
+                    for x in 0..bw as usize {
+                        // Tolerate AA-fringe jitter (clipped vs unclipped
+                        // rasterization differs by up to ~20/255 on edge
+                        // pixels); real stale content differs by 100+.
+                        let differs = a[x * 4..x * 4 + 4]
+                            .iter()
+                            .zip(&b[x * 4..x * 4 + 4])
+                            .any(|(p, q)| p.abs_diff(*q) > 24);
+                        if differs {
+                            min_x = min_x.min(x as i32);
+                            max_x = max_x.max(x as i32);
+                            min_y = min_y.min(y as i32);
+                            max_y = max_y.max(y as i32);
+                        }
+                    }
+                }
+            }
+            if max_x >= 0 {
+                let i = (min_y as usize) * stride + (min_x as usize) * 4;
+                log::warn!(
+                    "CHECK frame {}: canvas diverges at device bbox ({min_x},{min_y})-({max_x},{max_y}), canvas px {:?} vs ref {:?}, owed rects: {rects:?}",
+                    self.frame_no,
+                    &canvas[i..i + 4],
+                    &reference[i..i + 4]
+                );
+            }
+        }
 
         if let Some(samples) = &mut self.perf {
             samples.push(t0.elapsed().as_secs_f64() * 1000.0);
