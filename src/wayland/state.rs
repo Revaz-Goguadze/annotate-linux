@@ -1376,6 +1376,7 @@ impl AppState {
                 });
             }
             Command::ReloadConfig => self.reload_config(),
+            Command::Export { path } => self.export_scene(&path),
             Command::Quit => {
                 self.teardown();
                 self.loop_signal.stop();
@@ -1386,6 +1387,56 @@ impl AppState {
             Ok(()) => Response::Ok,
             Err(e) => Response::Error { message: format!("{e:#}") },
         }
+    }
+
+    /// Render one output's annotations to a PNG: the focused output when it
+    /// has content, else the first output that does.
+    fn export_scene(&self, path: &str) -> Result<()> {
+        let with_content: Vec<u32> = self
+            .scenes
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(k, _)| *k as u32)
+            .collect();
+        let key = with_content
+            .iter()
+            .copied()
+            .find(|k| Some(*k) == self.focused_output)
+            .or_else(|| with_content.first().copied())
+            .or(self.focused_output)
+            .or_else(|| self.overlays.keys().next().copied())
+            .ok_or_else(|| anyhow::anyhow!("nothing to export (no annotations, no overlay)"))?;
+
+        let (logical, scale) = if let Some(oo) = self.overlays.get(&key).filter(|oo| oo.overlay.width > 0) {
+            ((oo.overlay.width, oo.overlay.height), oo.overlay.scale)
+        } else {
+            let output = self
+                .output_state
+                .outputs()
+                .find(|o| output_key(o) == key)
+                .ok_or_else(|| anyhow::anyhow!("output {key} is gone"))?;
+            let info = self
+                .output_state
+                .info(&output)
+                .ok_or_else(|| anyhow::anyhow!("no info for output {key}"))?;
+            let (w, h) = info
+                .logical_size
+                .ok_or_else(|| anyhow::anyhow!("no logical size for output {key}"))?;
+            ((w as u32, h as u32), info.scale_factor as f64)
+        };
+
+        let empty = Scene::new();
+        let scene = self.scenes.get(&(key as u64)).unwrap_or(&empty);
+        crate::render::export::export_png(
+            std::path::Path::new(path),
+            logical,
+            scale,
+            self.board,
+            self.board_opacity,
+            scene,
+        )?;
+        log::info!("exported {} object(s) to {path}", scene.len());
+        Ok(())
     }
 
     pub fn teardown(&mut self) {

@@ -91,10 +91,13 @@ annotate-linux toggle | show | hide
               | board <none|white|black> [--opacity 0.85]
               | mode <fade|persist> [--seconds 3]
               | cursor <style> [--highlight true]
+              | export [path] | copy
               | counter-reset | status | reload-config | quit
 ```
 
-`status` prints JSON. Config lives at
+`status` prints JSON. `export` renders the annotations to a PNG
+(transparent background unless a board is active; works with the overlay
+hidden too); `copy` puts that PNG on the clipboard via wl-copy. Config lives at
 `~/.config/annotate-linux/config.toml`, runtime state at
 `~/.local/state/annotate-linux/state.toml`.
 

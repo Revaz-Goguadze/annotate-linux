@@ -15,7 +15,7 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 calloop = { version = "0.14", features = ["signals"] }
 calloop-wayland-source = "0.4"
-cairo-rs = { version = "0.22", default-features = false }
+cairo-rs = { version = "0.22", default-features = false, features = ["png"] }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 serde_ignored = "0.1"

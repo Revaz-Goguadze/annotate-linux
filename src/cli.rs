@@ -55,6 +55,11 @@ pub enum Cmd {
     Status,
     /// Re-read config.toml in the running daemon
     ReloadConfig,
+    /// Save the annotations as a PNG (transparent background unless a
+    /// board is active). Default: ./annotate-<timestamp>.png
+    Export { path: Option<String> },
+    /// Copy the annotations to the clipboard as a PNG (needs wl-copy)
+    Copy,
     /// Stop the daemon
     Quit,
     /// Print shell completions to stdout
@@ -65,7 +70,7 @@ impl Cmd {
     /// Map a client subcommand to the wire command. `Daemon` has no mapping.
     pub fn to_ipc(&self) -> Option<Command> {
         Some(match self {
-            Cmd::Daemon | Cmd::Completions { .. } => return None,
+            Cmd::Daemon | Cmd::Completions { .. } | Cmd::Export { .. } | Cmd::Copy => return None,
             Cmd::Toggle => Command::Toggle,
             Cmd::Show => Command::Show,
             Cmd::Hide => Command::Hide,

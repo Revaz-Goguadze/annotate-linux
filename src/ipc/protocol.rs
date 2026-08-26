@@ -20,6 +20,8 @@ pub enum Command {
     Cursor { style: Option<String>, highlight: Option<bool> },
     Status,
     ReloadConfig,
+    /// Render the annotations to a PNG at `path`.
+    Export { path: String },
     Quit,
 }
 
