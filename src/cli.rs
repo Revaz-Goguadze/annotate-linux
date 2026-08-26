@@ -57,13 +57,15 @@ pub enum Cmd {
     ReloadConfig,
     /// Stop the daemon
     Quit,
+    /// Print shell completions to stdout
+    Completions { shell: clap_complete::Shell },
 }
 
 impl Cmd {
     /// Map a client subcommand to the wire command. `Daemon` has no mapping.
     pub fn to_ipc(&self) -> Option<Command> {
         Some(match self {
-            Cmd::Daemon => return None,
+            Cmd::Daemon | Cmd::Completions { .. } => return None,
             Cmd::Toggle => Command::Toggle,
             Cmd::Show => Command::Show,
             Cmd::Hide => Command::Hide,

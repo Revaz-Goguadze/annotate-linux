@@ -1,3 +1,7 @@
+pub mod keys;
+pub mod state;
+
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
@@ -14,6 +18,8 @@ pub struct Config {
     pub general: General,
     pub appearance: Appearance,
     pub cursor: Cursor,
+    /// Keybinding overrides: `"ctrl+shift+z" = "redo"`, `"p" = ""` unbinds.
+    pub keys: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -114,7 +120,13 @@ impl Config {
 
     pub fn load_from(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(text) => Ok(toml::from_str(&text)?),
+            Ok(text) => {
+                let de = toml::Deserializer::parse(&text)?;
+                let cfg: Config = serde_ignored::deserialize(de, |unknown| {
+                    log::warn!("config: unknown key `{unknown}` in {} (ignored)", path.display());
+                })?;
+                Ok(cfg)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e.into()),
         }

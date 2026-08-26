@@ -200,47 +200,6 @@ fn preview_bounds(tool: Tool, anchor: Point, cur: Point, mods: Mods, style: &Sty
     }
 }
 
-/// Default keybindings (config-table override lands in M8).
-pub mod keymap {
-    use super::{Action, Tool};
-    use crate::model::constraints::Mods;
-    use smithay_client_toolkit::seat::keyboard::Keysym;
-
-    pub fn action_for(keysym: Keysym, mods: Mods) -> Option<Action> {
-        if mods.ctrl {
-            return match keysym {
-                Keysym::z if mods.shift => Some(Action::Redo),
-                Keysym::Z => Some(Action::Redo),
-                Keysym::z => Some(Action::Undo),
-                Keysym::r | Keysym::R => Some(Action::CounterReset),
-                Keysym::c | Keysym::C => Some(Action::Copy),
-                Keysym::x | Keysym::X => Some(Action::Cut),
-                Keysym::v | Keysym::V => Some(Action::Paste),
-                Keysym::d | Keysym::D => Some(Action::Duplicate),
-                _ => None,
-            };
-        }
-        Some(match keysym {
-            Keysym::Escape => Action::Hide,
-            Keysym::p => Action::SelectTool(Tool::Pen),
-            Keysym::h => Action::SelectTool(Tool::Highlighter),
-            Keysym::l => Action::SelectTool(Tool::Line),
-            Keysym::a => Action::SelectTool(Tool::Arrow),
-            Keysym::r => Action::SelectTool(Tool::Rect),
-            Keysym::e => Action::SelectTool(Tool::Ellipse),
-            Keysym::t => Action::SelectTool(Tool::Text),
-            Keysym::n => Action::SelectTool(Tool::Counter),
-            Keysym::s => Action::SelectTool(Tool::Select),
-            Keysym::x => Action::SelectTool(Tool::Eraser),
-            Keysym::c => Action::ToggleColorPicker,
-            Keysym::w => Action::ToggleWidthPicker,
-            Keysym::b => Action::CycleBoard,
-            Keysym::Delete => Action::DeleteSelection,
-            _ => return None,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -33,8 +33,10 @@ use wayland_client::{
 use super::outputs::{OverlayOutput, output_key};
 use super::scaling::ScalingState;
 use super::surface::{FrameCtx, Overlay};
+use crate::config::keys::Keymap;
+use crate::config::state::RuntimeState;
 use crate::config::Config;
-use crate::input::{Action, Drag, DragUpdate, InputState, Tool, keymap, text_edit};
+use crate::input::{Action, Drag, DragUpdate, InputState, Tool, text_edit};
 use crate::model::fade;
 use crate::render::board::BoardKind;
 use crate::render::cursor_fx::{CursorFx, CursorStyle};
@@ -157,6 +159,9 @@ pub struct AppState {
     ripples: Vec<(u32, Point, Instant)>,
     fx_timer: bool,
     pub loop_handle: LoopHandle<'static, AppState>,
+    keymap: Keymap,
+    /// Debounced runtime-state save armed?
+    state_timer: bool,
     debug_damage: bool,
 }
 
@@ -176,10 +181,32 @@ impl AppState {
             .collect();
         let palette = if palette.is_empty() { vec![Rgba::new(0.9, 0.2, 0.2, 1.0)] } else { palette };
         let board_opacity = config.appearance.board_opacity.clamp(0.1, 1.0);
-        let fade_enabled = config.general.fade_default;
-        let fade_seconds = config.general.fade_seconds;
+        let keymap = Keymap::with_overrides(&config.keys)?;
         let cursor_style = CursorStyle::from_name(&config.cursor.style).unwrap_or_default();
         let cursor_highlight = config.cursor.highlight;
+
+        // Restore last session's tool/color/width/board/fade.
+        let saved = RuntimeState::load();
+        let tool = Tool::from_name(&saved.tool).unwrap_or(Tool::Pen);
+        let mut palette = palette;
+        let color_idx = if saved.color.is_empty() {
+            0
+        } else if let Ok(c) = Rgba::parse(&saved.color) {
+            palette.iter().position(|p| *p == c).unwrap_or_else(|| {
+                palette.push(c);
+                palette.len() - 1
+            })
+        } else {
+            0
+        };
+        let width = if saved.width > 0.0 {
+            saved.width.clamp(WIDTH_MIN, WIDTH_MAX)
+        } else {
+            config.appearance.default_width
+        };
+        let board = BoardKind::from_name(&saved.board).unwrap_or(BoardKind::None);
+        let fade_enabled = saved.fade || config.general.fade_default;
+        let fade_seconds = config.general.fade_seconds;
         Ok(Self {
             registry_state: RegistryState::new(globals),
             seat_state: SeatState::new(globals, qh),
@@ -195,18 +222,18 @@ impl AppState {
             loop_signal,
             keyboard: None,
             pointer: None,
-            width: config.appearance.default_width,
+            width,
             config,
             mode: Mode::Hidden,
             overlays: HashMap::new(),
             scenes: HashMap::new(),
             active_drag: None,
             undo: UndoStack::default(),
-            input: InputState::default(),
+            input: InputState { tool, ..Default::default() },
             palette,
-            color_idx: 0,
+            color_idx,
             ui: UiState::default(),
-            board: BoardKind::None,
+            board,
             board_opacity,
             focused_output: None,
             counter_next: 1,
@@ -226,6 +253,8 @@ impl AppState {
             ripples: Vec::new(),
             fx_timer: false,
             loop_handle,
+            keymap,
+            state_timer: false,
             debug_damage: std::env::var("ANNOTATE_DEBUG_DAMAGE").is_ok_and(|v| v == "1"),
         })
     }
@@ -392,8 +421,55 @@ impl AppState {
     fn set_board(&mut self, kind: BoardKind) {
         if self.board != kind {
             self.board = kind;
+            self.mark_state_dirty();
             self.damage_all();
         }
+    }
+
+    /// Debounced (750 ms) atomic save of tool/color/width/board/fade.
+    fn mark_state_dirty(&mut self) {
+        if self.state_timer {
+            return;
+        }
+        self.state_timer = true;
+        let _ = self.loop_handle.insert_source(
+            Timer::from_duration(Duration::from_millis(750)),
+            |_, _, state: &mut AppState| {
+                state.state_timer = false;
+                let snapshot = RuntimeState {
+                    tool: state.input.tool.name().into(),
+                    color: state.palette[state.color_idx].to_hex(),
+                    width: state.width,
+                    board: state.board.name().into(),
+                    fade: state.fade_enabled,
+                };
+                if let Err(e) = snapshot.save() {
+                    log::warn!("state save failed: {e:#}");
+                }
+                TimeoutAction::Drop
+            },
+        );
+    }
+
+    /// Re-read config.toml and apply what can change at runtime.
+    fn reload_config(&mut self) -> Result<()> {
+        let config = Config::load()?;
+        let keymap = Keymap::with_overrides(&config.keys)?;
+        let palette: Vec<Rgba> =
+            config.appearance.palette.iter().filter_map(|s| Rgba::parse(s).ok()).collect();
+        if !palette.is_empty() {
+            self.palette = palette;
+            self.color_idx = self.color_idx.min(self.palette.len() - 1);
+        }
+        self.keymap = keymap;
+        self.board_opacity = config.appearance.board_opacity.clamp(0.1, 1.0);
+        self.fade_seconds = config.general.fade_seconds;
+        self.cursor_style = CursorStyle::from_name(&config.cursor.style).unwrap_or_default();
+        self.cursor_highlight = config.cursor.highlight;
+        self.config = config;
+        self.damage_all();
+        log::info!("config reloaded");
+        Ok(())
     }
 
     /// Arm the ~30 Hz fade tick if fade mode is on and anything exists.
@@ -928,6 +1004,7 @@ impl AppState {
                     self.selection = None;
                 }
                 self.input.tool = tool;
+                self.mark_state_dirty();
                 log::debug!("tool: {}", tool.name());
             }
             Action::Undo => {
@@ -1161,6 +1238,7 @@ impl AppState {
             self.palette.push(rgba);
             self.color_idx = self.palette.len() - 1;
         }
+        self.mark_state_dirty();
         Ok(())
     }
 
@@ -1173,6 +1251,7 @@ impl AppState {
             value.parse::<f64>()?
         };
         self.width = new.clamp(WIDTH_MIN, WIDTH_MAX);
+        self.mark_state_dirty();
         Ok(())
     }
 
@@ -1198,6 +1277,7 @@ impl AppState {
                     if f {
                         self.ensure_fade_timer();
                     }
+                    self.mark_state_dirty();
                     self.damage_all();
                 }
                 Ok(())
@@ -1270,15 +1350,11 @@ impl AppState {
                         .collect(),
                 });
             }
+            Command::ReloadConfig => self.reload_config(),
             Command::Quit => {
                 self.teardown();
                 self.loop_signal.stop();
                 Ok(())
-            }
-            other => {
-                return Response::Error {
-                    message: format!("not implemented yet (planned milestone): {other:?}"),
-                };
             }
         };
         match result {
@@ -1457,7 +1533,7 @@ impl KeyboardHandler for AppState {
         if self.handle_text_key(&event) {
             return;
         }
-        if let Some(action) = keymap::action_for(event.keysym, self.input.mods) {
+        if let Some(action) = self.keymap.lookup(event.keysym, self.input.mods) {
             self.dispatch(action);
         }
     }

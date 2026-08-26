@@ -10,6 +10,11 @@ fn main() -> Result<()> {
 
     match &cli.command {
         Cmd::Daemon => annotate_linux::wayland::run_daemon(),
+        Cmd::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(*shell, &mut Cli::command(), "annotate-linux", &mut std::io::stdout());
+            Ok(())
+        }
         cmd => {
             let command = cmd.to_ipc().expect("non-daemon command maps to IPC");
             match ipc::client::send(&command) {
