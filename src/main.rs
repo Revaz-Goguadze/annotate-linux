@@ -17,7 +17,14 @@ fn main() -> Result<()> {
         }
         cmd => {
             let command = cmd.to_ipc().expect("non-daemon command maps to IPC");
-            match ipc::client::send(&command) {
+            // Status and Quit report on a missing daemon instead of starting one.
+            let result = match &command {
+                ipc::protocol::Command::Status | ipc::protocol::Command::Quit => {
+                    ipc::client::send(&command)
+                }
+                _ => ipc::client::send_or_autostart(&command),
+            };
+            match result {
                 Ok(ipc::protocol::Response::Ok) => Ok(()),
                 Ok(ipc::protocol::Response::Status(s)) => {
                     println!("{}", serde_json::to_string_pretty(&s)?);

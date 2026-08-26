@@ -57,6 +57,8 @@ pub struct FrameCtx<'a> {
 pub struct Overlay {
     pub layer: LayerSurface,
     pub pool: SlotPool,
+    /// ANNOTATE_PERF=1: rolling per-frame paint times (ms).
+    perf: Option<Vec<f64>>,
     /// Logical size from the layer configure.
     pub width: u32,
     pub height: u32,
@@ -122,9 +124,11 @@ impl Overlay {
         layer.commit();
 
         let pool = SlotPool::new(4096, shm)?;
+        let perf = std::env::var("ANNOTATE_PERF").is_ok_and(|v| v == "1").then(Vec::new);
         Ok(Self {
             layer,
             pool,
+            perf,
             width: 0,
             height: 0,
             scale: 1.0,
@@ -210,6 +214,7 @@ impl Overlay {
             Some(rs) => rs,
         };
 
+        let t0 = std::time::Instant::now();
         with_cairo(canvas, bw, bh, |cr| {
             // All drawing below happens in logical px.
             cr.scale(scale, scale);
@@ -288,6 +293,20 @@ impl Overlay {
                 cr.stroke().expect("debug rects");
             }
         })?;
+
+        if let Some(samples) = &mut self.perf {
+            samples.push(t0.elapsed().as_secs_f64() * 1000.0);
+            if samples.len() >= 100 {
+                samples.sort_by(|a, b| a.total_cmp(b));
+                log::info!(
+                    "perf: paint median {:.2} ms, p90 {:.2} ms over {} frames",
+                    samples[samples.len() / 2],
+                    samples[samples.len() * 9 / 10],
+                    samples.len()
+                );
+                samples.clear();
+            }
+        }
 
         let surface = self.layer.wl_surface();
         if let Some(viewport) = &self.viewport {

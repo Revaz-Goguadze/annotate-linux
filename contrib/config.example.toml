@@ -1,0 +1,38 @@
+# annotate-linux configuration — copy to ~/.config/annotate-linux/config.toml
+# Every key is optional; these are the defaults.
+
+[general]
+# "exclusive" grabs the keyboard while drawing (single-key shortcuts);
+# "on-demand" leaves focus-follows behavior to the compositor.
+keyboard_interactivity = "exclusive"
+auto_clear_on_toggle = false
+fade_seconds = 3.0
+fade_default = false
+namespace = "annotate-linux"
+
+[appearance]
+palette = [
+    "#e53935", "#fb8c00", "#fdd835", "#43a047",
+    "#1e88e5", "#8e24aa", "#000000", "#ffffff",
+]
+default_width = 4.0
+highlighter_alpha = 0.35
+board_opacity = 0.85
+text_px = 24.0
+counter_radius = 16.0
+
+[cursor]
+# default | none | outline | circle | crosshair
+style = "default"
+highlight = false
+highlight_radius = 48.0
+ripple = false
+ripple_ms = 450
+
+[keys]
+# Overrides layered on the defaults; "" unbinds. Esc always hides.
+# "q" = "tool:ellipse"
+# "ctrl+shift+z" = "redo"
+# Actions: tool:<pen|highlighter|line|arrow|rect|ellipse|counter|text|select|eraser>,
+#          undo, redo, clear, hide, color-picker, width-picker, board,
+#          counter-reset, copy, cut, paste, duplicate, delete

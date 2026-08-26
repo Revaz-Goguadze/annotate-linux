@@ -1,0 +1,19 @@
+# annotate-linux — Hyprland integration
+# Append to ~/.config/hypr/hyprland.conf (or `source =` this file).
+
+# Start the daemon with the session (optional — the CLI autostarts a
+# missing daemon on first use)
+exec-once = annotate-linux daemon
+
+# Toggle the drawing overlay
+bind = SUPER, A, exec, annotate-linux toggle
+
+# Always-on passthrough (annotations visible, clicks go through).
+# This bind is ALSO the only way back out of passthrough — keep it.
+bind = SUPER SHIFT, A, exec, annotate-linux passthrough
+
+# Clear all annotations
+bind = SUPER CTRL, A, exec, annotate-linux clear
+
+# No open/close animation for the overlay
+layerrule = noanim, annotate-linux

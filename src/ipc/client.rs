@@ -1,10 +1,13 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
 use super::protocol::{Command, Response};
 use super::socket_path;
+
+const AUTOSTART_WAIT: Duration = Duration::from_millis(1500);
 
 /// Send one command to the running daemon, return its response.
 /// Fails with a clear message when no daemon is listening.
@@ -17,6 +20,44 @@ pub fn send(cmd: &Command) -> Result<Response> {
         )
     })?;
     send_on(stream, cmd)
+}
+
+/// Like [`send`], but spawns a detached daemon on connect failure and
+/// retries once after it binds the socket.
+pub fn send_or_autostart(cmd: &Command) -> Result<Response> {
+    if let Ok(resp) = send(cmd) {
+        return Ok(resp);
+    }
+    spawn_daemon().context("autostarting the daemon")?;
+    let path = socket_path()?;
+    let deadline = Instant::now() + AUTOSTART_WAIT;
+    while Instant::now() < deadline {
+        if UnixStream::connect(&path).is_ok() {
+            return send(cmd);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("daemon did not come up within {AUTOSTART_WAIT:?}");
+}
+
+/// Start `annotate-linux daemon` in its own session so it survives the
+/// caller (and the compositor bind's exec) exiting.
+fn spawn_daemon() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let exe = std::env::current_exe().context("resolving own binary path")?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("daemon")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    unsafe {
+        cmd.pre_exec(|| {
+            rustix::process::setsid().map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    cmd.spawn().context("spawning the daemon")?;
+    Ok(())
 }
 
 fn send_on(mut stream: UnixStream, cmd: &Command) -> Result<Response> {
