@@ -10,6 +10,8 @@ Native Rust + smithay-client-toolkit + cairo. No GTK, no Electron, no
 XWayland. Fractional scale (e.g. 1.6) renders pixel-crisp via
 `wp_fractional_scale_v1` + `wp_viewporter`.
 
+![annotate-linux demo: pen, highlighter, arrow, line, shapes, counters, text and the toolbar](assets/screenshot.png)
+
 ## Features
 
 - **Tools:** pen, highlighter (self-crossing-safe translucency), line,
