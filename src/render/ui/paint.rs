@@ -133,6 +133,24 @@ fn icon(cr: &cairo::Context, b: UiButton, r: Rect, ctx: &UiPaintCtx) {
             cr.restore().unwrap();
             cr.stroke().unwrap();
         }
+        UiButton::Tool(Tool::Counter) => {
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            cr.arc(cx, cy, (x1 - x0) / 2.0, 0.0, std::f64::consts::TAU);
+            cr.stroke().unwrap();
+            cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+            cr.set_font_size(12.0);
+            let ext = cr.text_extents("1").unwrap();
+            cr.move_to(cx - ext.width() / 2.0 - ext.x_bearing(), cy + ext.height() / 2.0);
+            cr.show_text("1").unwrap();
+        }
+        UiButton::Tool(Tool::Text) => {
+            cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+            cr.set_font_size(16.0);
+            let ext = cr.text_extents("T").unwrap();
+            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            cr.move_to(cx - ext.width() / 2.0 - ext.x_bearing(), cy + ext.height() / 2.0);
+            cr.show_text("T").unwrap();
+        }
         UiButton::ColorSwatch => {
             let c = ctx.palette[ctx.color_idx];
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);

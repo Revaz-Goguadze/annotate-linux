@@ -55,6 +55,12 @@ fn paint_kind(cr: &cairo::Context, obj: &Object) {
             cr.rectangle(r.x, r.y, r.w, r.h);
             cr.stroke().expect("stroke");
         }
+        ObjectKind::Counter { at, n, r } => {
+            crate::render::text::paint_counter(cr, *at, *n, *r);
+        }
+        ObjectKind::Text { at, s, px } => {
+            crate::render::text::paint_text(cr, *at, s, *px);
+        }
         ObjectKind::Ellipse { r } => {
             if r.w <= 0.0 || r.h <= 0.0 {
                 return;

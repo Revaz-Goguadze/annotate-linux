@@ -52,6 +52,10 @@ pub struct Appearance {
     pub highlighter_alpha: f64,
     /// Board opacity 0.1..=1.0
     pub board_opacity: f64,
+    /// Text tool font size in logical px
+    pub text_px: f64,
+    /// Counter badge radius in logical px
+    pub counter_radius: f64,
 }
 
 impl Default for Appearance {
@@ -70,6 +74,8 @@ impl Default for Appearance {
             default_width: 4.0,
             highlighter_alpha: 0.35,
             board_opacity: 0.85,
+            text_px: 24.0,
+            counter_radius: 16.0,
         }
     }
 }

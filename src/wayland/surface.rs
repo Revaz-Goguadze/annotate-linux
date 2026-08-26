@@ -34,6 +34,8 @@ pub struct FrameCtx<'a> {
     pub preview: Option<&'a Object>,
     pub board: BoardKind,
     pub board_opacity: f64,
+    /// Draw an end-of-text caret on the preview (open text draft).
+    pub caret: bool,
     /// Present only on the output that shows the toolbar.
     pub ui: Option<(&'a UiLayout, UiPaintCtx<'a>)>,
     pub debug_damage: bool,
@@ -198,6 +200,9 @@ impl Overlay {
             if let Some(p) = ctx.preview {
                 if rects.iter().any(|r| r.intersects(p.bounds)) {
                     paint_object(cr, p);
+                    if ctx.caret {
+                        crate::render::text::paint_caret(cr, p);
+                    }
                 }
             }
 

@@ -1,9 +1,10 @@
 //! AppState: all daemon state plus the SCTK protocol handler impls.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use calloop::LoopSignal;
+use calloop::{LoopHandle, LoopSignal};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_pointer,
@@ -32,14 +33,14 @@ use super::outputs::{OverlayOutput, output_key};
 use super::scaling::ScalingState;
 use super::surface::{FrameCtx, Overlay};
 use crate::config::Config;
-use crate::input::{Action, Drag, DragUpdate, InputState, Tool, keymap};
+use crate::input::{Action, Drag, DragUpdate, InputState, Tool, keymap, text_edit};
 use crate::render::board::BoardKind;
 use crate::render::ui::{self, UiButton, UiHit, UiState, paint::UiPaintCtx};
 use crate::ipc::protocol::{Command, Response, StatusPayload};
 use crate::model::constraints::Mods;
 use crate::model::edit::Edit;
 use crate::model::geom::{Point, Rect};
-use crate::model::object::{Object, Style};
+use crate::model::object::{Object, ObjectKind, Style};
 use crate::model::scene::Scene;
 use crate::model::undo::UndoStack;
 use crate::util::color::Rgba;
@@ -54,6 +55,38 @@ const HIGHLIGHTER_WIDTH_FACTOR: f64 = 3.0;
 pub enum Mode {
     Hidden,
     Interactive,
+}
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// An open text entry (new or double-click edit). Not yet in the scene.
+struct TextDraft {
+    key: u32,
+    at: Point,
+    s: String,
+    px: f64,
+    style: Style,
+    /// (index, original) when editing an existing object.
+    replace: Option<(usize, Object)>,
+}
+
+impl TextDraft {
+    fn object(&self) -> Object {
+        Object::new(
+            crate::model::object::ObjectId(0),
+            ObjectKind::Text { at: self.at, s: self.s.clone(), px: self.px },
+            self.style,
+        )
+    }
+}
+
+/// Live reposition drag of an existing text object.
+struct TextMove {
+    key: u32,
+    idx: usize,
+    orig: Object,
+    grab: Point,
+    moved: bool,
 }
 
 pub struct AppState {
@@ -89,6 +122,11 @@ pub struct AppState {
     board_opacity: f64,
     /// Output under the pointer; the toolbar lives here.
     focused_output: Option<u32>,
+    counter_next: u32,
+    text_draft: Option<TextDraft>,
+    text_move: Option<TextMove>,
+    last_click: Option<(Instant, u32, usize)>,
+    pub loop_handle: LoopHandle<'static, AppState>,
     debug_damage: bool,
 }
 
@@ -97,6 +135,7 @@ impl AppState {
         globals: &GlobalList,
         qh: &QueueHandle<AppState>,
         loop_signal: LoopSignal,
+        loop_handle: LoopHandle<'static, AppState>,
         config: Config,
     ) -> Result<Self> {
         let palette: Vec<Rgba> = config
@@ -136,6 +175,11 @@ impl AppState {
             board: BoardKind::None,
             board_opacity,
             focused_output: None,
+            counter_next: 1,
+            text_draft: None,
+            text_move: None,
+            last_click: None,
+            loop_handle,
             debug_damage: std::env::var("ANNOTATE_DEBUG_DAMAGE").is_ok_and(|v| v == "1"),
         })
     }
@@ -196,6 +240,9 @@ impl AppState {
     /// grab is released and costs the compositor nothing while hidden.
     /// Scenes persist unless auto-clear is on.
     pub fn hide(&mut self) {
+        self.commit_text_draft();
+        self.text_move = None;
+        self.last_click = None;
         if !self.overlays.is_empty() {
             self.overlays.clear();
             log::info!("overlay hidden");
@@ -299,9 +346,177 @@ impl AppState {
         }
     }
 
+    fn text_style(&self) -> Style {
+        Style { stroke: self.palette[self.color_idx], width: 2.0, group_alpha: 1.0 }
+    }
+
+    fn topmost_text_at(scene: &Scene, pos: Point) -> Option<usize> {
+        scene
+            .objects
+            .iter()
+            .rposition(|o| matches!(o.kind, ObjectKind::Text { .. }) && o.bounds.contains(pos))
+    }
+
+    /// Commit (or discard, when empty and new) the open text draft.
+    fn commit_text_draft(&mut self) {
+        let Some(mut d) = self.text_draft.take() else { return };
+        let key64 = d.key as u64;
+        let obj_bounds = d.object().bounds;
+        let scene = self.scenes.entry(key64).or_default();
+        match d.replace.take() {
+            Some((idx, orig)) => {
+                let idx = idx.min(scene.len());
+                if d.s.is_empty() {
+                    // Edited down to nothing: object stays removed.
+                    self.undo.record_applied(key64, Edit::Insert { at: idx, obj: orig });
+                } else {
+                    let mut obj = d.object();
+                    obj.id = orig.id;
+                    scene.objects.insert(idx, obj);
+                    self.undo.record_applied(key64, Edit::Replace { at: idx, obj: orig });
+                }
+            }
+            None => {
+                if !d.s.is_empty() {
+                    let mut obj = d.object();
+                    obj.id = scene.alloc_id();
+                    let at = scene.len();
+                    self.undo.commit(key64, Edit::Insert { at, obj }, scene);
+                }
+            }
+        }
+        self.record_damage(d.key, &[obj_bounds]);
+    }
+
+    /// Keystroke routed into the open draft. Returns true when consumed.
+    fn handle_text_key(&mut self, event: &KeyEvent) -> bool {
+        if self.text_draft.is_none() {
+            return false;
+        }
+        let old_bounds = self.text_draft.as_ref().map(|d| d.object().bounds);
+        match event.keysym {
+            Keysym::Return | Keysym::KP_Enter | Keysym::Escape => {
+                self.commit_text_draft();
+                return true;
+            }
+            Keysym::BackSpace => {
+                let ctrl = self.input.mods.ctrl;
+                if let Some(d) = &mut self.text_draft {
+                    if ctrl {
+                        text_edit::backspace_word(&mut d.s);
+                    } else {
+                        text_edit::backspace(&mut d.s);
+                    }
+                }
+            }
+            _ => {
+                let Some(u) = event.utf8.as_deref().filter(|u| !u.is_empty()) else { return true };
+                if let Some(d) = &mut self.text_draft {
+                    text_edit::push_str(&mut d.s, u);
+                }
+            }
+        }
+        if let (Some(old), Some(d)) = (old_bounds, self.text_draft.as_ref()) {
+            let (key, damage) = (d.key, old.union(d.object().bounds));
+            self.record_damage(key, &[damage]);
+        }
+        true
+    }
+
+    /// Key-repeat events (from SCTK's calloop repeat source).
+    pub fn on_repeat_key(&mut self, event: KeyEvent) {
+        self.handle_text_key(&event);
+    }
+
+    /// Press with the Text tool: new draft, move-drag, or double-click edit.
+    fn handle_text_press(&mut self, key: u32, pos: Point) {
+        self.commit_text_draft();
+        let scene = self.scenes.entry(key as u64).or_default();
+        if let Some(idx) = Self::topmost_text_at(scene, pos) {
+            let now = Instant::now();
+            let dbl = self
+                .last_click
+                .is_some_and(|(t, k, i)| k == key && i == idx && now.duration_since(t) < DOUBLE_CLICK);
+            self.last_click = Some((now, key, idx));
+            if dbl {
+                // Second click: lift the object out of the scene into a draft.
+                let orig = scene.objects.remove(idx);
+                let ObjectKind::Text { at, s, px } = orig.kind.clone() else { return };
+                let bounds = orig.bounds;
+                self.text_draft =
+                    Some(TextDraft { key, at, s, px, style: orig.style, replace: Some((idx, orig)) });
+                self.record_damage(key, &[bounds]);
+            } else {
+                let orig = scene.objects[idx].clone();
+                self.text_move = Some(TextMove { key, idx, orig, grab: pos, moved: false });
+            }
+        } else {
+            self.last_click = None;
+            let d = TextDraft {
+                key,
+                at: pos,
+                s: String::new(),
+                px: self.config.appearance.text_px,
+                style: self.text_style(),
+                replace: None,
+            };
+            let bounds = d.object().bounds;
+            self.text_draft = Some(d);
+            self.record_damage(key, &[bounds]);
+        }
+    }
+
+    fn handle_counter_press(&mut self, key: u32, pos: Point) {
+        let n = self.counter_next;
+        self.counter_next += 1;
+        let style = self.text_style();
+        let r = self.config.appearance.counter_radius;
+        let scene = self.scenes.entry(key as u64).or_default();
+        let id = scene.alloc_id();
+        let obj = Object::new(id, ObjectKind::Counter { at: pos, n, r }, style);
+        let bounds = obj.bounds;
+        let at = scene.len();
+        self.undo.commit(key as u64, Edit::Insert { at, obj }, scene);
+        self.record_damage(key, &[bounds]);
+    }
+
+    fn handle_text_motion(&mut self, surface_key: u32, pos: Point) -> bool {
+        let Some(tm) = &mut self.text_move else { return false };
+        if tm.key != surface_key {
+            return true;
+        }
+        tm.moved = true;
+        let (dx, dy) = (pos.x - tm.grab.x, pos.y - tm.grab.y);
+        let mut moved = tm.orig.clone();
+        moved.kind.translate(dx, dy);
+        moved.recompute_bounds();
+        let (key, idx) = (tm.key, tm.idx);
+        let new_bounds = moved.bounds;
+        let scene = self.scenes.entry(key as u64).or_default();
+        let Some(slot) = scene.objects.get_mut(idx) else {
+            self.text_move = None;
+            return true;
+        };
+        let old_bounds = slot.bounds;
+        *slot = moved;
+        self.record_damage(key, &[old_bounds.union(new_bounds)]);
+        true
+    }
+
+    fn handle_text_release(&mut self) -> bool {
+        let Some(tm) = self.text_move.take() else { return false };
+        if tm.moved {
+            self.undo.record_applied(tm.key as u64, Edit::Replace { at: tm.idx, obj: tm.orig });
+        }
+        true
+    }
+
     pub fn dispatch(&mut self, action: Action) {
         match action {
             Action::SelectTool(tool) => {
+                if tool != Tool::Text {
+                    self.commit_text_draft();
+                }
                 self.input.tool = tool;
                 log::debug!("tool: {}", tool.name());
             }
@@ -354,6 +569,9 @@ impl AppState {
                 let next = self.board.cycle();
                 self.set_board(next);
                 self.damage_ui();
+            }
+            Action::CounterReset => {
+                self.counter_next = 1;
             }
         }
     }
@@ -410,6 +628,10 @@ impl AppState {
     /// output, compositor-paced via frame callbacks.
     pub fn flush_frames(&mut self) {
         let style = self.current_style();
+        // The open text draft previews (with caret) on its own output and
+        // outranks any drag preview.
+        let draft_preview: Option<(u32, Object)> =
+            self.text_draft.as_ref().map(|d| (d.key, d.object()));
         let preview = self.input.preview(&style);
         let debug_damage = self.debug_damage;
         let ui_key = self.ui_output_key();
@@ -421,11 +643,15 @@ impl AppState {
             let o = &mut oo.overlay;
             if o.configured && o.dirty && !o.frame_pending {
                 let scene = self.scenes.entry(*key as u64).or_default();
-                let preview_here =
-                    if self.active_drag == Some(*key) { preview.as_ref() } else { None };
+                let (preview_here, caret) = match &draft_preview {
+                    Some((dk, obj)) if dk == key => (Some(obj), true),
+                    _ if self.active_drag == Some(*key) => (preview.as_ref(), false),
+                    _ => (None, false),
+                };
                 let ctx = FrameCtx {
                     scene,
                     preview: preview_here,
+                    caret,
                     board: self.board,
                     board_opacity: self.board_opacity,
                     ui: ui_layouts.get(key).map(|layout| {
@@ -507,6 +733,10 @@ impl AppState {
             },
             Command::Color { value } => self.set_color(&value),
             Command::Width { value } => self.set_width(&value),
+            Command::CounterReset => {
+                self.dispatch(Action::CounterReset);
+                Ok(())
+            }
             Command::Board { mode, opacity } => (|| {
                 if let Some(o) = opacity {
                     anyhow::ensure!((0.1..=1.0).contains(&o), "opacity must be 0.1..=1.0");
@@ -673,7 +903,16 @@ impl SeatHandler for AppState {
 
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = self.seat_state.get_keyboard(qh, &seat, None).ok();
+            self.keyboard = self
+                .seat_state
+                .get_keyboard_with_repeat(
+                    qh,
+                    &seat,
+                    None,
+                    self.loop_handle.clone(),
+                    Box::new(|state, _kbd, event| state.on_repeat_key(event)),
+                )
+                .ok();
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
             self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
@@ -712,6 +951,10 @@ impl KeyboardHandler for AppState {
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
 
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
+        // An open text draft eats the keyboard before the keymap.
+        if self.handle_text_key(&event) {
+            return;
+        }
         if let Some(action) = keymap::action_for(event.keysym, self.input.mods) {
             self.dispatch(action);
         }
@@ -761,10 +1004,24 @@ impl PointerHandler for AppState {
                     if self.handle_ui_press(surface_key, pos) {
                         continue;
                     }
+                    match self.input.tool {
+                        Tool::Text => {
+                            self.handle_text_press(surface_key, pos);
+                            continue;
+                        }
+                        Tool::Counter => {
+                            self.handle_counter_press(surface_key, pos);
+                            continue;
+                        }
+                        _ => {}
+                    }
                     self.active_drag = Some(surface_key);
                     (surface_key, self.input.on_press(pos, &style))
                 }
                 Motion { .. } => {
+                    if self.handle_text_motion(surface_key, pos) {
+                        continue;
+                    }
                     if self.input.drag == Drag::UiSlider {
                         if let Some(layout) = self.ui_layout_on(surface_key) {
                             if let Some((_, track)) = layout.width_popup {
@@ -781,6 +1038,9 @@ impl PointerHandler for AppState {
                     (key, self.input.on_motion(pos, &style))
                 }
                 Release { button: BTN_LEFT, .. } => {
+                    if self.handle_text_release() {
+                        continue;
+                    }
                     if self.input.drag == Drag::UiSlider {
                         self.input.drag = Drag::Idle;
                         continue;

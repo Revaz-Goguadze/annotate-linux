@@ -1,6 +1,8 @@
 //! Tool vocabulary, default keymap, and the pointer drag state machine.
 //! Pure logic — Wayland types stay in `wayland/`.
 
+pub mod text_edit;
+
 use crate::model::constraints::{self, Mods};
 use crate::model::geom::{Point, Rect};
 use crate::model::object::{Object, ObjectId, ObjectKind, Style};
@@ -13,6 +15,8 @@ pub enum Tool {
     Arrow,
     Rect,
     Ellipse,
+    Counter,
+    Text,
 }
 
 impl Tool {
@@ -24,6 +28,8 @@ impl Tool {
             Tool::Arrow => "arrow",
             Tool::Rect => "rect",
             Tool::Ellipse => "ellipse",
+            Tool::Counter => "counter",
+            Tool::Text => "text",
         }
     }
 
@@ -35,6 +41,8 @@ impl Tool {
             "arrow" => Tool::Arrow,
             "rect" | "rectangle" => Tool::Rect,
             "ellipse" | "circle" => Tool::Ellipse,
+            "counter" => Tool::Counter,
+            "text" => Tool::Text,
             _ => return None,
         })
     }
@@ -51,6 +59,7 @@ pub enum Action {
     ToggleColorPicker,
     ToggleWidthPicker,
     CycleBoard,
+    CounterReset,
 }
 
 /// The in-progress pointer drag.
@@ -90,9 +99,12 @@ impl Default for InputState {
 }
 
 impl InputState {
+    /// Start a drag. Counter and Text presses never reach this — the app
+    /// layer handles them before the drag FSM.
     pub fn on_press(&mut self, pos: Point, style: &Style) -> DragUpdate {
         self.drag = match self.tool {
             Tool::Pen | Tool::Highlighter => Drag::Stroke { pts: vec![pos] },
+            Tool::Counter | Tool::Text => return DragUpdate::default(),
             _ => Drag::Shape { anchor: pos, cur: pos },
         };
         DragUpdate {
@@ -187,6 +199,7 @@ pub mod keymap {
                 Keysym::z if mods.shift => Some(Action::Redo),
                 Keysym::Z => Some(Action::Redo),
                 Keysym::z => Some(Action::Undo),
+                Keysym::r | Keysym::R => Some(Action::CounterReset),
                 _ => None,
             };
         }
@@ -198,6 +211,8 @@ pub mod keymap {
             Keysym::a => Action::SelectTool(Tool::Arrow),
             Keysym::r => Action::SelectTool(Tool::Rect),
             Keysym::e => Action::SelectTool(Tool::Ellipse),
+            Keysym::t => Action::SelectTool(Tool::Text),
+            Keysym::n => Action::SelectTool(Tool::Counter),
             Keysym::c => Action::ToggleColorPicker,
             Keysym::w => Action::ToggleWidthPicker,
             Keysym::b => Action::CycleBoard,

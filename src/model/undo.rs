@@ -32,6 +32,16 @@ impl UndoStack {
         self.undone.clear();
     }
 
+    /// Record an edit that was already applied directly to the scene (live
+    /// drags mutate in place); `inverse` must undo it exactly. Clears redo.
+    pub fn record_applied(&mut self, key: u64, inverse: Edit) {
+        self.done.push((key, inverse));
+        if self.done.len() > self.cap {
+            self.done.remove(0);
+        }
+        self.undone.clear();
+    }
+
     /// Undo the most recent edit. `resolve` maps the entry's key to its
     /// scene; keys must stay resolvable (purge with `forget_key` when an
     /// output disappears). Returns the affected key.

@@ -24,7 +24,7 @@ pub fn run_daemon() -> Result<()> {
     let (globals, event_queue) = registry_queue_init::<AppState>(&conn)?;
     let qh = event_queue.handle();
 
-    let mut event_loop: EventLoop<AppState> = EventLoop::try_new()?;
+    let mut event_loop: EventLoop<'static, AppState> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
 
     WaylandSource::new(conn, event_queue)
@@ -42,7 +42,7 @@ pub fn run_daemon() -> Result<()> {
 
     let _socket_guard = ipc::server::setup(&loop_handle).context("setting up the IPC socket")?;
 
-    let mut app = AppState::new(&globals, &qh, event_loop.get_signal(), config)?;
+    let mut app = AppState::new(&globals, &qh, event_loop.get_signal(), loop_handle.clone(), config)?;
     log::info!("daemon running (socket: {})", ipc::socket_path()?.display());
 
     event_loop
