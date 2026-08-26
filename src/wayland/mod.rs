@@ -1,6 +1,8 @@
 //! Daemon entry: Wayland connection + calloop event loop + IPC socket.
 
 pub mod buffer;
+pub mod outputs;
+pub mod scaling;
 pub mod state;
 pub mod surface;
 

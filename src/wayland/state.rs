@@ -1,5 +1,7 @@
 //! AppState: all daemon state plus the SCTK protocol handler impls.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use calloop::LoopSignal;
 use smithay_client_toolkit::{
@@ -26,6 +28,8 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
 };
 
+use super::outputs::{OverlayOutput, output_key};
+use super::scaling::ScalingState;
 use super::surface::Overlay;
 use crate::config::Config;
 use crate::input::{Action, DragUpdate, InputState, Tool, keymap};
@@ -57,6 +61,7 @@ pub struct AppState {
     pub compositor_state: CompositorState,
     pub layer_shell: LayerShell,
     pub shm: Shm,
+    pub scaling: ScalingState,
     pub qh: QueueHandle<AppState>,
     pub loop_signal: LoopSignal,
 
@@ -65,9 +70,13 @@ pub struct AppState {
 
     pub config: Config,
     pub mode: Mode,
-    pub overlay: Option<Overlay>,
+    /// Surfaces, present only while shown. Keyed by wl_output protocol id.
+    overlays: HashMap<u32, OverlayOutput>,
+    /// Annotations, persistent across hide/show. Keyed by output key.
+    scenes: HashMap<u64, Scene>,
+    /// Output the current pointer drag started on.
+    active_drag: Option<u32>,
 
-    scene: Scene,
     undo: UndoStack,
     input: InputState,
     palette: Vec<Rgba>,
@@ -100,6 +109,7 @@ impl AppState {
                 anyhow::anyhow!("zwlr_layer_shell_v1 unavailable (compositor without wlr-layer-shell?): {e}")
             })?,
             shm: Shm::bind(globals, qh).map_err(|e| anyhow::anyhow!("wl_shm unavailable: {e}"))?,
+            scaling: ScalingState::bind(globals, qh),
             qh: qh.clone(),
             loop_signal,
             keyboard: None,
@@ -107,8 +117,9 @@ impl AppState {
             width: config.appearance.default_width,
             config,
             mode: Mode::Hidden,
-            overlay: None,
-            scene: Scene::new(),
+            overlays: HashMap::new(),
+            scenes: HashMap::new(),
+            active_drag: None,
             undo: UndoStack::default(),
             input: InputState::default(),
             palette,
@@ -126,37 +137,61 @@ impl AppState {
         }
     }
 
-    pub fn show(&mut self) -> Result<()> {
-        if self.overlay.is_some() {
-            return Ok(());
-        }
-        let ki = match self.config.general.keyboard_interactivity.as_str() {
+    fn keyboard_interactivity(&self) -> KeyboardInteractivity {
+        match self.config.general.keyboard_interactivity.as_str() {
             "on-demand" => KeyboardInteractivity::OnDemand,
             _ => KeyboardInteractivity::Exclusive,
-        };
+        }
+    }
+
+    fn create_overlay_for(&mut self, output: &wl_output::WlOutput) -> Result<()> {
+        let key = output_key(output);
+        if self.overlays.contains_key(&key) {
+            return Ok(());
+        }
+        let name = self.output_state.info(output).and_then(|i| i.name);
         let overlay = Overlay::create(
             &self.compositor_state,
             &self.layer_shell,
             &self.shm,
+            &self.scaling,
             &self.qh,
+            output,
+            key,
             &self.config.general.namespace,
-            ki,
+            self.keyboard_interactivity(),
         )?;
-        self.overlay = Some(overlay);
-        self.mode = Mode::Interactive;
-        log::info!("overlay shown");
+        self.scenes.entry(key as u64).or_default();
+        self.overlays.insert(key, OverlayOutput { output: output.clone(), name, overlay });
         Ok(())
     }
 
-    /// Destroying the surface (not hiding it) guarantees the keyboard grab
-    /// is released and costs the compositor nothing while hidden.
+    pub fn show(&mut self) -> Result<()> {
+        if self.mode == Mode::Interactive {
+            return Ok(());
+        }
+        let outputs: Vec<_> = self.output_state.outputs().collect();
+        anyhow::ensure!(!outputs.is_empty(), "no outputs available");
+        for output in &outputs {
+            self.create_overlay_for(output)?;
+        }
+        self.mode = Mode::Interactive;
+        log::info!("overlay shown on {} output(s)", self.overlays.len());
+        Ok(())
+    }
+
+    /// Destroying the surfaces (not hiding them) guarantees the keyboard
+    /// grab is released and costs the compositor nothing while hidden.
+    /// Scenes persist unless auto-clear is on.
     pub fn hide(&mut self) {
-        if self.overlay.take().is_some() {
+        if !self.overlays.is_empty() {
+            self.overlays.clear();
             log::info!("overlay hidden");
         }
         self.input.drag = crate::input::Drag::Idle;
+        self.active_drag = None;
         if self.config.general.auto_clear_on_toggle {
-            self.scene = Scene::new();
+            self.scenes.values_mut().for_each(|s| *s = Scene::new());
             self.undo.clear();
         }
         self.mode = Mode::Hidden;
@@ -172,33 +207,54 @@ impl AppState {
         }
     }
 
-    fn damage_all(&mut self) {
-        if let Some(overlay) = &mut self.overlay {
-            overlay.damage.invalidate_all();
-            overlay.dirty = true;
+    pub fn on_preferred_scale(&mut self, key: u32, scale: f64) {
+        if let Some(oo) = self.overlays.get_mut(&key) {
+            oo.overlay.set_scale(scale);
         }
     }
 
-    fn record_damage(&mut self, rects: &[Rect]) {
-        if let Some(overlay) = &mut self.overlay {
+    fn damage_all(&mut self) {
+        for oo in self.overlays.values_mut() {
+            oo.overlay.damage.invalidate_all();
+            oo.overlay.dirty = true;
+        }
+    }
+
+    fn damage_key(&mut self, key: u32) {
+        if let Some(oo) = self.overlays.get_mut(&key) {
+            oo.overlay.damage.invalidate_all();
+            oo.overlay.dirty = true;
+        }
+    }
+
+    fn record_damage(&mut self, key: u32, rects: &[Rect]) {
+        if let Some(oo) = self.overlays.get_mut(&key) {
             for r in rects {
-                overlay.damage.record(*r);
+                oo.overlay.damage.record(*r);
             }
             if !rects.is_empty() {
-                overlay.dirty = true;
+                oo.overlay.dirty = true;
             }
         }
     }
 
-    fn apply_drag_update(&mut self, update: DragUpdate) {
-        self.record_damage(&update.damage);
+    fn apply_drag_update(&mut self, key: u32, update: DragUpdate) {
+        self.record_damage(key, &update.damage);
         if let Some(kind) = update.committed {
             let style = self.current_style();
-            let id = self.scene.alloc_id();
+            let scene = self.scenes.entry(key as u64).or_default();
+            let id = scene.alloc_id();
             let obj = Object::new(id, kind, style);
-            let at = self.scene.len();
-            self.undo.commit(Edit::Insert { at, obj }, &mut self.scene);
+            let at = scene.len();
+            self.undo.commit(key as u64, Edit::Insert { at, obj }, scene);
         }
+    }
+
+    fn surface_key(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
+        self.overlays
+            .iter()
+            .find(|(_, oo)| oo.overlay.layer.wl_surface() == surface)
+            .map(|(k, _)| *k)
     }
 
     pub fn dispatch(&mut self, action: Action) {
@@ -208,18 +264,28 @@ impl AppState {
                 log::debug!("tool: {}", tool.name());
             }
             Action::Undo => {
-                if self.undo.undo(&mut self.scene) {
-                    self.damage_all();
+                let scenes = &mut self.scenes;
+                if let Some(key) = self.undo.undo(|k| scenes.get_mut(&k)) {
+                    self.damage_key(key as u32);
                 }
             }
             Action::Redo => {
-                if self.undo.redo(&mut self.scene) {
-                    self.damage_all();
+                let scenes = &mut self.scenes;
+                if let Some(key) = self.undo.redo(|k| scenes.get_mut(&k)) {
+                    self.damage_key(key as u32);
                 }
             }
             Action::Clear => {
-                if let Some(edit) = Edit::clear_all(&self.scene) {
-                    self.undo.commit(edit, &mut self.scene);
+                let keys: Vec<u64> = self.scenes.keys().copied().collect();
+                let mut any = false;
+                for key in keys {
+                    let scene = self.scenes.get_mut(&key).expect("key just listed");
+                    if let Some(edit) = Edit::clear_all(scene) {
+                        self.undo.commit(key, edit, scene);
+                        any = true;
+                    }
+                }
+                if any {
                     self.damage_all();
                 }
             }
@@ -227,20 +293,20 @@ impl AppState {
         }
     }
 
-    /// Called after every event-loop dispatch: render at most one frame,
-    /// compositor-paced via frame callbacks.
+    /// Called after every event-loop dispatch: render at most one frame per
+    /// output, compositor-paced via frame callbacks.
     pub fn flush_frames(&mut self) {
-        let preview = self
-            .overlay
-            .as_ref()
-            .and_then(|o| (o.configured && o.dirty && !o.frame_pending).then_some(()))
-            .and_then(|()| self.input.preview(&self.current_style()));
+        let style = self.current_style();
+        let preview = self.input.preview(&style);
         let debug_damage = self.debug_damage;
-        let scene = &self.scene;
-        if let Some(overlay) = &mut self.overlay {
-            if overlay.configured && overlay.dirty && !overlay.frame_pending {
-                if let Err(e) = overlay.draw(&self.qh, scene, preview.as_ref(), debug_damage) {
-                    log::error!("draw failed: {e:#}");
+        for (key, oo) in &mut self.overlays {
+            let o = &mut oo.overlay;
+            if o.configured && o.dirty && !o.frame_pending {
+                let scene = self.scenes.entry(*key as u64).or_default();
+                let preview_here =
+                    if self.active_drag == Some(*key) { preview.as_ref() } else { None };
+                if let Err(e) = o.draw(&self.qh, scene, preview_here, debug_damage) {
+                    log::error!("draw failed on output {key}: {e:#}");
                 }
             }
         }
@@ -313,7 +379,7 @@ impl AppState {
                     tool: self.input.tool.name().into(),
                     color: self.palette[self.color_idx].to_hex(),
                     width: self.width,
-                    objects: self.scene.len(),
+                    objects: self.scenes.values().map(|s| s.len()).sum(),
                     outputs: self
                         .output_state
                         .outputs()
@@ -339,13 +405,28 @@ impl AppState {
     }
 
     pub fn teardown(&mut self) {
-        self.overlay = None;
+        self.overlays.clear();
     }
 }
 
 impl CompositorHandler for AppState {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {
-        // M2: integer scale 1 everywhere; fractional scale lands in M3.
+    /// Integer-scale fallback, only for surfaces without a fractional-scale
+    /// object (never combine set_buffer_scale with a viewport destination).
+    fn scale_factor_changed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        factor: i32,
+    ) {
+        if let Some(key) = self.surface_key(surface) {
+            if let Some(oo) = self.overlays.get_mut(&key) {
+                if oo.overlay.fractional.is_none() {
+                    surface.set_buffer_scale(factor);
+                    oo.overlay.set_scale(factor as f64);
+                }
+            }
+        }
     }
 
     fn transform_changed(
@@ -357,9 +438,11 @@ impl CompositorHandler for AppState {
     ) {
     }
 
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        if let Some(overlay) = &mut self.overlay {
-            overlay.frame_pending = false;
+    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
+        if let Some(key) = self.surface_key(surface) {
+            if let Some(oo) = self.overlays.get_mut(&key) {
+                oo.overlay.frame_pending = false;
+            }
         }
         self.flush_frames();
     }
@@ -370,29 +453,30 @@ impl CompositorHandler for AppState {
 }
 
 impl LayerShellHandler for AppState {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
-        // Compositor closed our surface (output gone, etc.).
-        self.hide();
+    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
+        // Compositor closed one surface (its output usually went away).
+        self.overlays.retain(|_, oo| &oo.overlay.layer != layer);
+        if self.overlays.is_empty() {
+            self.hide();
+        }
     }
 
     fn configure(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &LayerSurface,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _: u32,
     ) {
-        let Some(overlay) = &mut self.overlay else { return };
+        let Some(oo) = self.overlays.values_mut().find(|oo| &oo.overlay.layer == layer) else {
+            return;
+        };
         let (w, h) = configure.new_size;
-        if w > 0 && h > 0 && (w != overlay.width || h != overlay.height) {
-            overlay.width = w;
-            overlay.height = h;
-            overlay.damage.invalidate_all();
-        }
-        overlay.configured = true;
-        overlay.dirty = true;
-        log::debug!("configured {w}x{h}");
+        oo.overlay.set_size(w, h);
+        oo.overlay.configured = true;
+        oo.overlay.dirty = true;
+        log::debug!("configured {w}x{h} on {:?}", oo.name);
     }
 }
 
@@ -401,11 +485,32 @@ impl OutputHandler for AppState {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        if self.mode != Mode::Hidden {
+            if let Err(e) = self.create_overlay_for(&output) {
+                log::error!("overlay on new output failed: {e:#}");
+            }
+        }
+    }
 
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        let key = output_key(&output);
+        if let Some(oo) = self.overlays.get_mut(&key) {
+            oo.name = self.output_state.info(&output).and_then(|i| i.name);
+        }
+    }
 
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        let key = output_key(&output);
+        self.overlays.remove(&key);
+        self.scenes.remove(&(key as u64));
+        self.undo.forget_key(key as u64);
+        if self.active_drag == Some(key) {
+            self.active_drag = None;
+            self.input.drag = crate::input::Drag::Idle;
+        }
+        log::info!("output {key} removed");
+    }
 }
 
 impl SeatHandler for AppState {
@@ -483,28 +588,38 @@ impl KeyboardHandler for AppState {
         };
         let style = self.current_style();
         let update = self.input.on_mods_changed(mods, &style);
-        self.apply_drag_update(update);
+        if let Some(key) = self.active_drag {
+            self.apply_drag_update(key, update);
+        }
     }
 }
 
 impl PointerHandler for AppState {
     fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
         use PointerEventKind::*;
-        let Some(overlay) = &self.overlay else { return };
-        let our_surface = overlay.layer.wl_surface().clone();
         for event in events {
-            if event.surface != our_surface {
-                continue;
-            }
+            let Some(surface_key) = self.surface_key(&event.surface) else { continue };
             let pos = Point::new(event.position.0, event.position.1);
             let style = self.current_style();
-            let update = match event.kind {
-                Press { button: BTN_LEFT, .. } => self.input.on_press(pos, &style),
-                Motion { .. } => self.input.on_motion(pos, &style),
-                Release { button: BTN_LEFT, .. } => self.input.on_release(pos, &style),
+            let (key, update) = match event.kind {
+                Press { button: BTN_LEFT, .. } => {
+                    self.active_drag = Some(surface_key);
+                    (surface_key, self.input.on_press(pos, &style))
+                }
+                Motion { .. } => {
+                    let Some(key) = self.active_drag else { continue };
+                    if key != surface_key {
+                        continue; // drag crossed outputs; ignore foreign motion
+                    }
+                    (key, self.input.on_motion(pos, &style))
+                }
+                Release { button: BTN_LEFT, .. } => {
+                    let Some(key) = self.active_drag.take() else { continue };
+                    (key, self.input.on_release(pos, &style))
+                }
                 _ => continue,
             };
-            self.apply_drag_update(update);
+            self.apply_drag_update(key, update);
         }
     }
 }
