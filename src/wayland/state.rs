@@ -30,9 +30,11 @@ use wayland_client::{
 
 use super::outputs::{OverlayOutput, output_key};
 use super::scaling::ScalingState;
-use super::surface::Overlay;
+use super::surface::{FrameCtx, Overlay};
 use crate::config::Config;
-use crate::input::{Action, DragUpdate, InputState, Tool, keymap};
+use crate::input::{Action, Drag, DragUpdate, InputState, Tool, keymap};
+use crate::render::board::BoardKind;
+use crate::render::ui::{self, UiButton, UiHit, UiState, paint::UiPaintCtx};
 use crate::ipc::protocol::{Command, Response, StatusPayload};
 use crate::model::constraints::Mods;
 use crate::model::edit::Edit;
@@ -82,6 +84,11 @@ pub struct AppState {
     palette: Vec<Rgba>,
     color_idx: usize,
     width: f64,
+    ui: UiState,
+    board: BoardKind,
+    board_opacity: f64,
+    /// Output under the pointer; the toolbar lives here.
+    focused_output: Option<u32>,
     debug_damage: bool,
 }
 
@@ -99,6 +106,7 @@ impl AppState {
             .filter_map(|s| Rgba::parse(s).ok())
             .collect();
         let palette = if palette.is_empty() { vec![Rgba::new(0.9, 0.2, 0.2, 1.0)] } else { palette };
+        let board_opacity = config.appearance.board_opacity.clamp(0.1, 1.0);
         Ok(Self {
             registry_state: RegistryState::new(globals),
             seat_state: SeatState::new(globals, qh),
@@ -124,6 +132,10 @@ impl AppState {
             input: InputState::default(),
             palette,
             color_idx: 0,
+            ui: UiState::default(),
+            board: BoardKind::None,
+            board_opacity,
+            focused_output: None,
             debug_damage: std::env::var("ANNOTATE_DEBUG_DAMAGE").is_ok_and(|v| v == "1"),
         })
     }
@@ -257,6 +269,36 @@ impl AppState {
             .map(|(k, _)| *k)
     }
 
+    /// The output showing the toolbar: the one under the pointer, else any.
+    fn ui_output_key(&self) -> Option<u32> {
+        self.focused_output
+            .filter(|k| self.overlays.contains_key(k))
+            .or_else(|| self.overlays.keys().next().copied())
+    }
+
+    fn ui_layout_on(&self, key: u32) -> Option<ui::UiLayout> {
+        let oo = self.overlays.get(&key)?;
+        Some(ui::layout(oo.overlay.surface_rect(), self.palette.len(), &self.ui))
+    }
+
+    /// Damage the maximal UI region (toolbar + both popups) on the UI output,
+    /// covering opens, closes, and indicator changes in one conservative rect.
+    fn damage_ui(&mut self) {
+        let Some(key) = self.ui_output_key() else { return };
+        let Some(oo) = self.overlays.get_mut(&key) else { return };
+        let all_open = UiState { color_picker_open: true, width_picker_open: true };
+        let layout = ui::layout(oo.overlay.surface_rect(), self.palette.len(), &all_open);
+        oo.overlay.damage.record(ui::ui_region(&layout));
+        oo.overlay.dirty = true;
+    }
+
+    fn set_board(&mut self, kind: BoardKind) {
+        if self.board != kind {
+            self.board = kind;
+            self.damage_all();
+        }
+    }
+
     pub fn dispatch(&mut self, action: Action) {
         match action {
             Action::SelectTool(tool) => {
@@ -289,8 +331,79 @@ impl AppState {
                     self.damage_all();
                 }
             }
-            Action::Hide => self.hide(),
+            Action::Hide => {
+                // Esc closes an open picker before it hides the overlay.
+                if self.ui.any_popup_open() {
+                    self.ui.close_popups();
+                    self.damage_ui();
+                } else {
+                    self.hide();
+                }
+            }
+            Action::ToggleColorPicker => {
+                self.ui.color_picker_open = !self.ui.color_picker_open;
+                self.ui.width_picker_open = false;
+                self.damage_ui();
+            }
+            Action::ToggleWidthPicker => {
+                self.ui.width_picker_open = !self.ui.width_picker_open;
+                self.ui.color_picker_open = false;
+                self.damage_ui();
+            }
+            Action::CycleBoard => {
+                let next = self.board.cycle();
+                self.set_board(next);
+                self.damage_ui();
+            }
         }
+    }
+
+    /// Returns true when the press was consumed by UI chrome.
+    fn handle_ui_press(&mut self, surface_key: u32, pos: Point) -> bool {
+        if Some(surface_key) != self.ui_output_key() {
+            // Toolbar lives elsewhere; a click here only closes popups.
+            if self.ui.any_popup_open() {
+                self.ui.close_popups();
+                self.damage_ui();
+            }
+            return false;
+        }
+        let Some(layout) = self.ui_layout_on(surface_key) else { return false };
+        match ui::hit(&layout, pos) {
+            Some(UiHit::Button(UiButton::Tool(t))) => {
+                self.dispatch(Action::SelectTool(t));
+                self.damage_ui();
+            }
+            Some(UiHit::Button(UiButton::ColorSwatch)) => self.dispatch(Action::ToggleColorPicker),
+            Some(UiHit::Button(UiButton::WidthIndicator)) => self.dispatch(Action::ToggleWidthPicker),
+            Some(UiHit::Button(UiButton::Board)) => self.dispatch(Action::CycleBoard),
+            Some(UiHit::Color(i)) => {
+                self.color_idx = i;
+                self.ui.close_popups();
+                self.damage_ui();
+            }
+            Some(UiHit::WidthTrack(w)) => {
+                self.width = w;
+                self.input.drag = Drag::UiSlider;
+                self.damage_ui();
+            }
+            Some(UiHit::Chrome) => {}
+            None => {
+                if self.ui.any_popup_open() {
+                    // Click outside an open popup closes it and is swallowed.
+                    self.ui.close_popups();
+                    self.damage_ui();
+                    return true;
+                }
+                return false;
+            }
+        }
+        true
+    }
+
+    fn adjust_width(&mut self, delta: f64) {
+        self.width = (self.width + delta).clamp(WIDTH_MIN, WIDTH_MAX);
+        self.damage_ui();
     }
 
     /// Called after every event-loop dispatch: render at most one frame per
@@ -299,13 +412,37 @@ impl AppState {
         let style = self.current_style();
         let preview = self.input.preview(&style);
         let debug_damage = self.debug_damage;
+        let ui_key = self.ui_output_key();
+        let ui_layouts: HashMap<u32, ui::UiLayout> = ui_key
+            .and_then(|k| self.ui_layout_on(k).map(|l| (k, l)))
+            .into_iter()
+            .collect();
         for (key, oo) in &mut self.overlays {
             let o = &mut oo.overlay;
             if o.configured && o.dirty && !o.frame_pending {
                 let scene = self.scenes.entry(*key as u64).or_default();
                 let preview_here =
                     if self.active_drag == Some(*key) { preview.as_ref() } else { None };
-                if let Err(e) = o.draw(&self.qh, scene, preview_here, debug_damage) {
+                let ctx = FrameCtx {
+                    scene,
+                    preview: preview_here,
+                    board: self.board,
+                    board_opacity: self.board_opacity,
+                    ui: ui_layouts.get(key).map(|layout| {
+                        (
+                            layout,
+                            UiPaintCtx {
+                                active_tool: self.input.tool,
+                                palette: &self.palette,
+                                color_idx: self.color_idx,
+                                width: self.width,
+                                board: self.board,
+                            },
+                        )
+                    }),
+                    debug_damage,
+                };
+                if let Err(e) = o.draw(&self.qh, &ctx) {
                     log::error!("draw failed on output {key}: {e:#}");
                 }
             }
@@ -370,6 +507,19 @@ impl AppState {
             },
             Command::Color { value } => self.set_color(&value),
             Command::Width { value } => self.set_width(&value),
+            Command::Board { mode, opacity } => (|| {
+                if let Some(o) = opacity {
+                    anyhow::ensure!((0.1..=1.0).contains(&o), "opacity must be 0.1..=1.0");
+                    self.board_opacity = o;
+                    self.damage_all();
+                }
+                if let Some(m) = mode {
+                    let kind = BoardKind::from_name(&m)
+                        .ok_or_else(|| anyhow::anyhow!("unknown board mode {m:?}"))?;
+                    self.set_board(kind);
+                }
+                Ok(())
+            })(),
             Command::Status => {
                 return Response::Status(StatusPayload {
                     mode: match self.mode {
@@ -379,6 +529,7 @@ impl AppState {
                     tool: self.input.tool.name().into(),
                     color: self.palette[self.color_idx].to_hex(),
                     width: self.width,
+                    board: self.board.name().into(),
                     objects: self.scenes.values().map(|s| s.len()).sum(),
                     outputs: self
                         .output_state
@@ -602,11 +753,27 @@ impl PointerHandler for AppState {
             let pos = Point::new(event.position.0, event.position.1);
             let style = self.current_style();
             let (key, update) = match event.kind {
+                Enter { .. } => {
+                    self.focused_output = Some(surface_key);
+                    continue;
+                }
                 Press { button: BTN_LEFT, .. } => {
+                    if self.handle_ui_press(surface_key, pos) {
+                        continue;
+                    }
                     self.active_drag = Some(surface_key);
                     (surface_key, self.input.on_press(pos, &style))
                 }
                 Motion { .. } => {
+                    if self.input.drag == Drag::UiSlider {
+                        if let Some(layout) = self.ui_layout_on(surface_key) {
+                            if let Some((_, track)) = layout.width_popup {
+                                self.width = ui::width_from_track_x(track, pos.x);
+                                self.damage_ui();
+                            }
+                        }
+                        continue;
+                    }
                     let Some(key) = self.active_drag else { continue };
                     if key != surface_key {
                         continue; // drag crossed outputs; ignore foreign motion
@@ -614,8 +781,20 @@ impl PointerHandler for AppState {
                     (key, self.input.on_motion(pos, &style))
                 }
                 Release { button: BTN_LEFT, .. } => {
+                    if self.input.drag == Drag::UiSlider {
+                        self.input.drag = Drag::Idle;
+                        continue;
+                    }
                     let Some(key) = self.active_drag.take() else { continue };
                     (key, self.input.on_release(pos, &style))
+                }
+                Axis { vertical, .. } => {
+                    // Ctrl+scroll adjusts the stroke width anywhere.
+                    if self.input.mods.ctrl && vertical.absolute.abs() > 0.0 {
+                        let step = if vertical.absolute < 0.0 { 0.5 } else { -0.5 };
+                        self.adjust_width(step);
+                    }
+                    continue;
                 }
                 _ => continue,
             };

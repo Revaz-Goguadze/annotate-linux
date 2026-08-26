@@ -48,6 +48,9 @@ pub enum Action {
     Redo,
     Clear,
     Hide,
+    ToggleColorPicker,
+    ToggleWidthPicker,
+    CycleBoard,
 }
 
 /// The in-progress pointer drag.
@@ -62,6 +65,8 @@ pub enum Drag {
         anchor: Point,
         cur: Point,
     },
+    /// Dragging the width-slider knob (UI, not drawing).
+    UiSlider,
 }
 
 /// What a pointer event changed: damage to repaint, and a finished object
@@ -99,7 +104,7 @@ impl InputState {
     pub fn on_motion(&mut self, pos: Point, style: &Style) -> DragUpdate {
         let margin = style.width / 2.0 + 2.0;
         match &mut self.drag {
-            Drag::Idle => DragUpdate::default(),
+            Drag::Idle | Drag::UiSlider => DragUpdate::default(),
             Drag::Stroke { pts } => {
                 let last = *pts.last().expect("stroke has at least the press point");
                 pts.push(pos);
@@ -134,7 +139,7 @@ impl InputState {
     pub fn on_release(&mut self, pos: Point, style: &Style) -> DragUpdate {
         let margin = style.width / 2.0 + 2.0;
         match std::mem::take(&mut self.drag) {
-            Drag::Idle => DragUpdate::default(),
+            Drag::Idle | Drag::UiSlider => DragUpdate::default(),
             Drag::Stroke { mut pts } => {
                 let last = *pts.last().expect("nonempty");
                 pts.push(pos);
@@ -155,7 +160,7 @@ impl InputState {
     /// The object being dragged right now, for rendering on top of the scene.
     pub fn preview(&self, style: &Style) -> Option<Object> {
         let kind = match &self.drag {
-            Drag::Idle => return None,
+            Drag::Idle | Drag::UiSlider => return None,
             Drag::Stroke { pts } => ObjectKind::Freehand { pts: pts.clone() },
             Drag::Shape { anchor, cur } => constraints::resolve(self.tool, *anchor, *cur, self.mods)?,
         };
@@ -193,6 +198,9 @@ pub mod keymap {
             Keysym::a => Action::SelectTool(Tool::Arrow),
             Keysym::r => Action::SelectTool(Tool::Rect),
             Keysym::e => Action::SelectTool(Tool::Ellipse),
+            Keysym::c => Action::ToggleColorPicker,
+            Keysym::w => Action::ToggleWidthPicker,
+            Keysym::b => Action::CycleBoard,
             Keysym::Delete => Action::Clear,
             _ => return None,
         })

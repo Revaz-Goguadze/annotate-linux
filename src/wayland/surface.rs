@@ -23,8 +23,21 @@ use super::state::AppState;
 use crate::model::geom::Rect;
 use crate::model::object::Object;
 use crate::model::scene::Scene;
+use crate::render::board::{self, BoardKind};
 use crate::render::damage::DamageTracker;
 use crate::render::objects::paint_object;
+use crate::render::ui::{self, UiLayout, paint::UiPaintCtx};
+
+/// Everything one frame needs, borrowed from AppState.
+pub struct FrameCtx<'a> {
+    pub scene: &'a Scene,
+    pub preview: Option<&'a Object>,
+    pub board: BoardKind,
+    pub board_opacity: f64,
+    /// Present only on the output that shows the toolbar.
+    pub ui: Option<(&'a UiLayout, UiPaintCtx<'a>)>,
+    pub debug_damage: bool,
+}
 
 pub struct Overlay {
     pub layer: LayerSurface,
@@ -140,13 +153,7 @@ impl Overlay {
 
     /// Render one frame and commit it. Repaints only this slot's pending
     /// damage; `None` from the tracker means full repaint.
-    pub fn draw(
-        &mut self,
-        qh: &QueueHandle<AppState>,
-        scene: &Scene,
-        preview: Option<&Object>,
-        debug_damage: bool,
-    ) -> Result<()> {
+    pub fn draw(&mut self, qh: &QueueHandle<AppState>, ctx: &FrameCtx<'_>) -> Result<()> {
         let (bw, bh) = self.buffer_size();
         if bw == 0 || bh == 0 {
             return Ok(());
@@ -181,18 +188,26 @@ impl Overlay {
             cr.paint().expect("clear");
             cr.set_operator(cairo::Operator::Over);
 
-            for obj in &scene.objects {
+            board::paint(cr, ctx.board, ctx.board_opacity);
+
+            for obj in &ctx.scene.objects {
                 if rects.iter().any(|r| r.intersects(obj.bounds)) {
                     paint_object(cr, obj);
                 }
             }
-            if let Some(p) = preview {
+            if let Some(p) = ctx.preview {
                 if rects.iter().any(|r| r.intersects(p.bounds)) {
                     paint_object(cr, p);
                 }
             }
 
-            if debug_damage {
+            if let Some((layout, paint_ctx)) = &ctx.ui {
+                if rects.iter().any(|r| r.intersects(ui::ui_region(layout))) {
+                    ui::paint::paint(cr, layout, paint_ctx);
+                }
+            }
+
+            if ctx.debug_damage {
                 cr.set_source_rgba(0.0, 1.0, 1.0, 0.9);
                 cr.set_line_width(1.0 / scale);
                 for r in &rects {

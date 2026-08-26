@@ -37,6 +37,7 @@ pub struct StatusPayload {
     pub tool: String,
     pub color: String,
     pub width: f64,
+    pub board: String,
     pub objects: usize,
     pub outputs: Vec<String>,
 }
@@ -76,6 +77,7 @@ mod tests {
             tool: "pen".into(),
             color: "#ff0000".into(),
             width: 4.0,
+            board: "none".into(),
             objects: 3,
             outputs: vec!["eDP-1".into()],
         });
