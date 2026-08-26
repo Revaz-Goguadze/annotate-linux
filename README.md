@@ -104,6 +104,8 @@ annotate-linux toggle | show | hide
 - The highlighter approximates marker ink with alpha compositing; a true
   multiply against screen content is impossible from a Wayland overlay
   (clients cannot read what is beneath them).
+- In fade mode, a fully faded object remains clickable/erasable for a ~2s
+  grace window before garbage collection removes it.
 
 ## License
 

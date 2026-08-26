@@ -426,6 +426,16 @@ impl AppState {
         }
     }
 
+    /// Drop in-flight pointer interactions that captured scene indices —
+    /// any scene mutation from outside the drag (undo/redo/clear/paste via
+    /// IPC or keyboard, fade gc) invalidates them; recording their inverses
+    /// afterwards would corrupt or panic on undo.
+    fn abort_index_interactions(&mut self) {
+        self.obj_move = None;
+        self.marquee = None;
+        self.erase = None;
+    }
+
     /// Debounced (750 ms) atomic save of tool/color/width/board/fade.
     fn mark_state_dirty(&mut self) {
         if self.state_timer {
@@ -515,6 +525,7 @@ impl AppState {
                     let o = scene.objects.remove(i);
                     damage.push(o.bounds);
                 }
+                self.abort_index_interactions();
                 // Index-based undo entries are invalid after gc; dropping the
                 // history is what guarantees undo never resurrects a faded
                 // ghost.
@@ -935,6 +946,7 @@ impl AppState {
 
     /// Delete the current selection as one undoable batch.
     fn delete_selection(&mut self) {
+        self.abort_index_interactions();
         let Some((key, _)) = self.selection.clone() else { return };
         let idxs = self.selected_indices(key);
         if idxs.is_empty() {
@@ -964,6 +976,7 @@ impl AppState {
         if objs.is_empty() {
             return;
         }
+        self.abort_index_interactions();
         let Some(key) = self
             .selection
             .as_ref()
@@ -1008,6 +1021,7 @@ impl AppState {
                 log::debug!("tool: {}", tool.name());
             }
             Action::Undo => {
+                self.abort_index_interactions();
                 let scenes = &mut self.scenes;
                 match self.undo.undo(|k| scenes.get_mut(&k)) {
                     Some(key) => {
@@ -1018,12 +1032,14 @@ impl AppState {
                 }
             }
             Action::Redo => {
+                self.abort_index_interactions();
                 let scenes = &mut self.scenes;
                 if let Some(key) = self.undo.redo(|k| scenes.get_mut(&k)) {
                     self.damage_key(key as u32);
                 }
             }
             Action::Clear => {
+                self.abort_index_interactions();
                 let keys: Vec<u64> = self.scenes.keys().copied().collect();
                 let mut any = false;
                 for key in keys {
