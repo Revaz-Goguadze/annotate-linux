@@ -28,10 +28,21 @@ use wayland_client::{
 
 use super::surface::Overlay;
 use crate::config::Config;
+use crate::input::{Action, DragUpdate, InputState, Tool, keymap};
 use crate::ipc::protocol::{Command, Response, StatusPayload};
-use crate::model::geom::Point;
+use crate::model::constraints::Mods;
+use crate::model::edit::Edit;
+use crate::model::geom::{Point, Rect};
+use crate::model::object::{Object, Style};
+use crate::model::scene::Scene;
+use crate::model::undo::UndoStack;
+use crate::util::color::Rgba;
 
 const BTN_LEFT: u32 = 0x110;
+const WIDTH_MIN: f64 = 0.5;
+const WIDTH_MAX: f64 = 20.0;
+/// Highlighter strokes are drawn thicker than the pen at the same setting.
+const HIGHLIGHTER_WIDTH_FACTOR: f64 = 3.0;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -56,10 +67,13 @@ pub struct AppState {
     pub mode: Mode,
     pub overlay: Option<Overlay>,
 
-    // M1 scene: finished strokes + the one being drawn. Replaced by
-    // model::Scene in M2.
-    strokes: Vec<Vec<Point>>,
-    current: Option<Vec<Point>>,
+    scene: Scene,
+    undo: UndoStack,
+    input: InputState,
+    palette: Vec<Rgba>,
+    color_idx: usize,
+    width: f64,
+    debug_damage: bool,
 }
 
 impl AppState {
@@ -69,6 +83,13 @@ impl AppState {
         loop_signal: LoopSignal,
         config: Config,
     ) -> Result<Self> {
+        let palette: Vec<Rgba> = config
+            .appearance
+            .palette
+            .iter()
+            .filter_map(|s| Rgba::parse(s).ok())
+            .collect();
+        let palette = if palette.is_empty() { vec![Rgba::new(0.9, 0.2, 0.2, 1.0)] } else { palette };
         Ok(Self {
             registry_state: RegistryState::new(globals),
             seat_state: SeatState::new(globals, qh),
@@ -83,12 +104,26 @@ impl AppState {
             loop_signal,
             keyboard: None,
             pointer: None,
+            width: config.appearance.default_width,
             config,
             mode: Mode::Hidden,
             overlay: None,
-            strokes: Vec::new(),
-            current: None,
+            scene: Scene::new(),
+            undo: UndoStack::default(),
+            input: InputState::default(),
+            palette,
+            color_idx: 0,
+            debug_damage: std::env::var("ANNOTATE_DEBUG_DAMAGE").is_ok_and(|v| v == "1"),
         })
+    }
+
+    fn current_style(&self) -> Style {
+        let highlighter = self.input.tool == Tool::Highlighter;
+        Style {
+            stroke: self.palette[self.color_idx],
+            width: if highlighter { self.width * HIGHLIGHTER_WIDTH_FACTOR } else { self.width },
+            group_alpha: if highlighter { self.config.appearance.highlighter_alpha } else { 1.0 },
+        }
     }
 
     pub fn show(&mut self) -> Result<()> {
@@ -119,9 +154,10 @@ impl AppState {
         if self.overlay.take().is_some() {
             log::info!("overlay hidden");
         }
-        self.current = None;
+        self.input.drag = crate::input::Drag::Idle;
         if self.config.general.auto_clear_on_toggle {
-            self.strokes.clear();
+            self.scene = Scene::new();
+            self.undo.clear();
         }
         self.mode = Mode::Hidden;
     }
@@ -136,21 +172,107 @@ impl AppState {
         }
     }
 
-    fn mark_dirty(&mut self) {
+    fn damage_all(&mut self) {
         if let Some(overlay) = &mut self.overlay {
+            overlay.damage.invalidate_all();
             overlay.dirty = true;
+        }
+    }
+
+    fn record_damage(&mut self, rects: &[Rect]) {
+        if let Some(overlay) = &mut self.overlay {
+            for r in rects {
+                overlay.damage.record(*r);
+            }
+            if !rects.is_empty() {
+                overlay.dirty = true;
+            }
+        }
+    }
+
+    fn apply_drag_update(&mut self, update: DragUpdate) {
+        self.record_damage(&update.damage);
+        if let Some(kind) = update.committed {
+            let style = self.current_style();
+            let id = self.scene.alloc_id();
+            let obj = Object::new(id, kind, style);
+            let at = self.scene.len();
+            self.undo.commit(Edit::Insert { at, obj }, &mut self.scene);
+        }
+    }
+
+    pub fn dispatch(&mut self, action: Action) {
+        match action {
+            Action::SelectTool(tool) => {
+                self.input.tool = tool;
+                log::debug!("tool: {}", tool.name());
+            }
+            Action::Undo => {
+                if self.undo.undo(&mut self.scene) {
+                    self.damage_all();
+                }
+            }
+            Action::Redo => {
+                if self.undo.redo(&mut self.scene) {
+                    self.damage_all();
+                }
+            }
+            Action::Clear => {
+                if let Some(edit) = Edit::clear_all(&self.scene) {
+                    self.undo.commit(edit, &mut self.scene);
+                    self.damage_all();
+                }
+            }
+            Action::Hide => self.hide(),
         }
     }
 
     /// Called after every event-loop dispatch: render at most one frame,
     /// compositor-paced via frame callbacks.
     pub fn flush_frames(&mut self) {
-        let Some(overlay) = &mut self.overlay else { return };
-        if overlay.configured && overlay.dirty && !overlay.frame_pending {
-            if let Err(e) = overlay.draw(&self.qh, &self.strokes, self.current.as_ref()) {
-                log::error!("draw failed: {e:#}");
+        let preview = self
+            .overlay
+            .as_ref()
+            .and_then(|o| (o.configured && o.dirty && !o.frame_pending).then_some(()))
+            .and_then(|()| self.input.preview(&self.current_style()));
+        let debug_damage = self.debug_damage;
+        let scene = &self.scene;
+        if let Some(overlay) = &mut self.overlay {
+            if overlay.configured && overlay.dirty && !overlay.frame_pending {
+                if let Err(e) = overlay.draw(&self.qh, scene, preview.as_ref(), debug_damage) {
+                    log::error!("draw failed: {e:#}");
+                }
             }
         }
+    }
+
+    fn set_color(&mut self, value: &str) -> Result<()> {
+        if value == "next" {
+            self.color_idx = (self.color_idx + 1) % self.palette.len();
+        } else if value == "prev" {
+            self.color_idx = (self.color_idx + self.palette.len() - 1) % self.palette.len();
+        } else if let Ok(idx) = value.parse::<usize>() {
+            anyhow::ensure!(idx < self.palette.len(), "palette index {idx} out of range");
+            self.color_idx = idx;
+        } else {
+            let rgba = Rgba::parse(value)?;
+            // ad-hoc colors are appended so the index stays meaningful
+            self.palette.push(rgba);
+            self.color_idx = self.palette.len() - 1;
+        }
+        Ok(())
+    }
+
+    fn set_width(&mut self, value: &str) -> Result<()> {
+        let new = if let Some(delta) = value.strip_prefix('+') {
+            self.width + delta.parse::<f64>()?
+        } else if value.starts_with('-') {
+            self.width + value.parse::<f64>()?
+        } else {
+            value.parse::<f64>()?
+        };
+        self.width = new.clamp(WIDTH_MIN, WIDTH_MAX);
+        Ok(())
     }
 
     pub fn handle_command(&mut self, cmd: Command) -> Response {
@@ -162,21 +284,36 @@ impl AppState {
                 Ok(())
             }
             Command::Clear => {
-                self.strokes.clear();
-                self.current = None;
-                self.mark_dirty();
+                self.dispatch(Action::Clear);
                 Ok(())
             }
+            Command::Undo => {
+                self.dispatch(Action::Undo);
+                Ok(())
+            }
+            Command::Redo => {
+                self.dispatch(Action::Redo);
+                Ok(())
+            }
+            Command::Tool { name } => match Tool::from_name(&name) {
+                Some(tool) => {
+                    self.dispatch(Action::SelectTool(tool));
+                    Ok(())
+                }
+                None => Err(anyhow::anyhow!("unknown tool {name:?}")),
+            },
+            Command::Color { value } => self.set_color(&value),
+            Command::Width { value } => self.set_width(&value),
             Command::Status => {
                 return Response::Status(StatusPayload {
                     mode: match self.mode {
                         Mode::Hidden => "hidden".into(),
                         Mode::Interactive => "interactive".into(),
                     },
-                    tool: "pen".into(),
-                    color: "#e53935".into(),
-                    width: 4.0,
-                    objects: self.strokes.len(),
+                    tool: self.input.tool.name().into(),
+                    color: self.palette[self.color_idx].to_hex(),
+                    width: self.width,
+                    objects: self.scene.len(),
                     outputs: self
                         .output_state
                         .outputs()
@@ -208,7 +345,7 @@ impl AppState {
 
 impl CompositorHandler for AppState {
     fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {
-        // M1: integer scale 1 everywhere; fractional scale lands in M3.
+        // M2: integer scale 1 everywhere; fractional scale lands in M3.
     }
 
     fn transform_changed(
@@ -248,9 +385,10 @@ impl LayerShellHandler for AppState {
     ) {
         let Some(overlay) = &mut self.overlay else { return };
         let (w, h) = configure.new_size;
-        if w > 0 && h > 0 {
+        if w > 0 && h > 0 && (w != overlay.width || h != overlay.height) {
             overlay.width = w;
             overlay.height = h;
+            overlay.damage.invalidate_all();
         }
         overlay.configured = true;
         overlay.dirty = true;
@@ -318,9 +456,8 @@ impl KeyboardHandler for AppState {
     fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: &wl_surface::WlSurface, _: u32) {}
 
     fn press_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_keyboard::WlKeyboard, _: u32, event: KeyEvent) {
-        // Esc is the hard-wired escape hatch: always hides, not rebindable.
-        if event.keysym == Keysym::Escape {
-            self.hide();
+        if let Some(action) = keymap::action_for(event.keysym, self.input.mods) {
+            self.dispatch(action);
         }
     }
 
@@ -334,10 +471,19 @@ impl KeyboardHandler for AppState {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: RawModifiers,
         _: u32,
     ) {
+        let mods = Mods {
+            shift: modifiers.shift,
+            ctrl: modifiers.ctrl,
+            alt: modifiers.alt,
+            logo: modifiers.logo,
+        };
+        let style = self.current_style();
+        let update = self.input.on_mods_changed(mods, &style);
+        self.apply_drag_update(update);
     }
 }
 
@@ -351,25 +497,14 @@ impl PointerHandler for AppState {
                 continue;
             }
             let pos = Point::new(event.position.0, event.position.1);
-            match event.kind {
-                Press { button: BTN_LEFT, .. } => {
-                    self.current = Some(vec![pos]);
-                    self.mark_dirty();
-                }
-                Motion { .. } => {
-                    if let Some(stroke) = &mut self.current {
-                        stroke.push(pos);
-                        self.mark_dirty();
-                    }
-                }
-                Release { button: BTN_LEFT, .. } => {
-                    if let Some(stroke) = self.current.take() {
-                        self.strokes.push(stroke);
-                        self.mark_dirty();
-                    }
-                }
-                _ => {}
-            }
+            let style = self.current_style();
+            let update = match event.kind {
+                Press { button: BTN_LEFT, .. } => self.input.on_press(pos, &style),
+                Motion { .. } => self.input.on_motion(pos, &style),
+                Release { button: BTN_LEFT, .. } => self.input.on_release(pos, &style),
+                _ => continue,
+            };
+            self.apply_drag_update(update);
         }
     }
 }
