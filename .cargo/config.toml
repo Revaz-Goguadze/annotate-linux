@@ -1,0 +1,8 @@
+# On this box a `cc` shim in ~/.local/bin shadows the real compiler;
+# pin build scripts and the linker to gcc explicitly.
+[env]
+CC = "gcc"
+CXX = "g++"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"

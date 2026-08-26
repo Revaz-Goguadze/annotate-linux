@@ -1,0 +1,117 @@
+use std::path::Path;
+
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+use crate::util::xdg;
+
+/// User configuration, read from `~/.config/annotate-linux/config.toml`.
+/// Every field has a default; a missing file means all defaults.
+/// Unknown keys are tolerated (warn-don't-fail happens at the load call site).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(default)]
+pub struct Config {
+    pub general: General,
+    pub appearance: Appearance,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct General {
+    /// "exclusive" | "on-demand" — layer-shell keyboard interactivity while interactive
+    pub keyboard_interactivity: String,
+    /// Clear all annotations when the overlay is toggled off
+    pub auto_clear_on_toggle: bool,
+    /// Fade mode duration in seconds
+    pub fade_seconds: f64,
+    /// Start in fade mode instead of persist
+    pub fade_default: bool,
+    /// Layer surface namespace (matches Hyprland layerrule)
+    pub namespace: String,
+}
+
+impl Default for General {
+    fn default() -> Self {
+        Self {
+            keyboard_interactivity: "exclusive".into(),
+            auto_clear_on_toggle: false,
+            fade_seconds: 3.0,
+            fade_default: false,
+            namespace: "annotate-linux".into(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(default)]
+pub struct Appearance {
+    /// Color palette as #rrggbb strings; first entry is the default color
+    pub palette: Vec<String>,
+    pub default_width: f64,
+    /// Alpha applied to highlighter strokes (group-composited)
+    pub highlighter_alpha: f64,
+    /// Board opacity 0.1..=1.0
+    pub board_opacity: f64,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            palette: vec![
+                "#e53935".into(), // red
+                "#fb8c00".into(), // orange
+                "#fdd835".into(), // yellow
+                "#43a047".into(), // green
+                "#1e88e5".into(), // blue
+                "#8e24aa".into(), // purple
+                "#000000".into(),
+                "#ffffff".into(),
+            ],
+            default_width: 4.0,
+            highlighter_alpha: 0.35,
+            board_opacity: 0.85,
+        }
+    }
+}
+
+impl Config {
+    /// Load from the default location; missing file → defaults.
+    pub fn load() -> Result<Self> {
+        Self::load_from(&xdg::config_dir().join("config.toml"))
+    }
+
+    pub fn load_from(path: &Path) -> Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(toml::from_str(&text)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_roundtrip_through_toml() {
+        let cfg = Config::default();
+        let text = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn partial_file_fills_defaults() {
+        let cfg: Config = toml::from_str("[appearance]\ndefault_width = 8.0\n").unwrap();
+        assert_eq!(cfg.appearance.default_width, 8.0);
+        assert_eq!(cfg.general.keyboard_interactivity, "exclusive");
+        assert_eq!(cfg.appearance.highlighter_alpha, 0.35);
+    }
+
+    #[test]
+    fn missing_file_is_defaults() {
+        let cfg = Config::load_from(Path::new("/nonexistent/annotate-test/config.toml")).unwrap();
+        assert_eq!(cfg, Config::default());
+    }
+}

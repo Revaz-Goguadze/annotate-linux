@@ -1,0 +1,30 @@
+[package]
+name = "annotate-linux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"
+description = "Keyboard-driven screen annotation overlay for wlr-layer-shell compositors (Hyprland, Sway, river)"
+repository = "https://github.com/Revaz-Goguadze/annotate-linux"
+
+[dependencies]
+# Pinned to 0.20.x: 0.21 is a breaking rewrite (delegate_* macros collapsed
+# into delegate_dispatch2!) with near-zero examples in the wild.
+smithay-client-toolkit = { version = "0.20.0", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+calloop = "0.14"
+calloop-wayland-source = "0.4"
+cairo-rs = { version = "0.22", default-features = false }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+rustix = { version = "1", features = ["fs", "process", "net"] }
+
+[profile.release]
+lto = "thin"
+strip = true
