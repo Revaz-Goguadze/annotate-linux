@@ -3,3 +3,4 @@ pub mod config;
 pub mod ipc;
 pub mod model;
 pub mod util;
+pub mod wayland;
