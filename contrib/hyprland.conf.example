@@ -15,5 +15,6 @@ bind = SUPER SHIFT, A, exec, annotate-linux passthrough
 # Clear all annotations
 bind = SUPER CTRL, A, exec, annotate-linux clear
 
-# No open/close animation for the overlay
-layerrule = noanim, annotate-linux
+# No open/close animation for the overlay (Hyprland >= 0.53 rule syntax;
+# on older Hyprland use: layerrule = noanim, annotate-linux)
+layerrule = no_anim on, match:namespace annotate-linux

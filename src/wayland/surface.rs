@@ -59,6 +59,9 @@ pub struct Overlay {
     pub pool: SlotPool,
     /// ANNOTATE_PERF=1: rolling per-frame paint times (ms).
     perf: Option<Vec<f64>>,
+    /// Pool byte length last frame; growth remaps the pool, which can move
+    /// slot addresses and alias the per-slot ledger keys.
+    pool_len: usize,
     /// Logical size from the layer configure.
     pub width: u32,
     pub height: u32,
@@ -129,6 +132,7 @@ impl Overlay {
             layer,
             pool,
             perf,
+            pool_len: 0,
             width: 0,
             height: 0,
             scale: 1.0,
@@ -201,6 +205,14 @@ impl Overlay {
         }
         let scale = self.scale;
         let surface_rect = self.surface_rect();
+        // Pool growth (inside create_buffer) remaps the shm mapping: old
+        // slot addresses die and can alias new slots. Checking the length
+        // from BEFORE this frame's create_buffer catches last frame's
+        // growth; the grown slot itself is unknown-key → full repaint.
+        if self.pool.len() != self.pool_len {
+            self.pool_len = self.pool.len();
+            self.damage.invalidate_all();
+        }
         let (buffer, canvas) = self.pool.create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888)?;
         let slot_key = canvas.as_ptr() as usize;
 
@@ -213,6 +225,20 @@ impl Overlay {
             }
             Some(rs) => rs,
         };
+        // Snap clip rects outward to whole device pixels: a fractional clip
+        // edge (any non-integer scale) leaves partially-covered pixels that
+        // neither the Source-clear nor the repaint fully own — visible as
+        // 1px ghost seams around every damage rect on opaque boards.
+        let rects: Vec<Rect> = rects
+            .iter()
+            .map(|r| {
+                let x0 = (r.x * scale).floor() / scale;
+                let y0 = (r.y * scale).floor() / scale;
+                let x1 = ((r.x + r.w) * scale).ceil() / scale;
+                let y1 = ((r.y + r.h) * scale).ceil() / scale;
+                Rect::new(x0, y0, x1 - x0, y1 - y0)
+            })
+            .collect();
 
         let t0 = std::time::Instant::now();
         with_cairo(canvas, bw, bh, |cr| {

@@ -52,8 +52,11 @@ exec-once = annotate-linux daemon        # optional: CLI autostarts it
 bind = SUPER,       A, exec, annotate-linux toggle
 bind = SUPER SHIFT, A, exec, annotate-linux passthrough
 bind = SUPER CTRL,  A, exec, annotate-linux clear
-layerrule = noanim, annotate-linux
+layerrule = no_anim on, match:namespace annotate-linux
 ```
+
+(Hyprland older than 0.53 uses the previous rule syntax:
+`layerrule = noanim, annotate-linux`.)
 
 Wayland has no global-hotkey API, so activation goes through your
 compositor's binds → the `annotate-linux` CLI → the daemon's socket. The

@@ -187,7 +187,12 @@ impl AppState {
 
         // Restore last session's tool/color/width/board/fade.
         let saved = RuntimeState::load();
-        let tool = Tool::from_name(&saved.tool).unwrap_or(Tool::Pen);
+        // Restoring a non-drawing tool reads as "drawing is broken" after a
+        // restart — those start back on the pen.
+        let tool = match Tool::from_name(&saved.tool) {
+            Some(Tool::Eraser) | Some(Tool::Select) | None => Tool::Pen,
+            Some(t) => t,
+        };
         let mut palette = palette;
         let color_idx = if saved.color.is_empty() {
             0
@@ -1255,6 +1260,7 @@ impl AppState {
             self.color_idx = self.palette.len() - 1;
         }
         self.mark_state_dirty();
+        self.damage_ui();
         Ok(())
     }
 
@@ -1268,6 +1274,7 @@ impl AppState {
         };
         self.width = new.clamp(WIDTH_MIN, WIDTH_MAX);
         self.mark_state_dirty();
+        self.damage_ui();
         Ok(())
     }
 
@@ -1549,7 +1556,7 @@ impl KeyboardHandler for AppState {
         if self.handle_text_key(&event) {
             return;
         }
-        if let Some(action) = self.keymap.lookup(event.keysym, self.input.mods) {
+        if let Some(action) = self.keymap.lookup(event.keysym, event.raw_code, self.input.mods) {
             self.dispatch(action);
         }
     }
@@ -1670,6 +1677,10 @@ impl PointerHandler for AppState {
                     (key, self.input.on_motion(pos, &style))
                 }
                 Release { button: BTN_LEFT, .. } => {
+                    // One full repaint per drag end: partial damage keeps
+                    // in-drag rendering cheap, and this bounds the lifetime
+                    // of any missed preview pixels to the drag itself.
+                    self.damage_key(surface_key);
                     if self.handle_move_release() {
                         continue;
                     }
