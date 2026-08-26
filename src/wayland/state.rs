@@ -80,14 +80,18 @@ impl TextDraft {
     }
 }
 
-/// Live reposition drag of an existing text object.
-struct TextMove {
+/// Live reposition drag of existing objects (text tool single, select
+/// tool multi). Scene objects mutate in place; undo records the inverse
+/// batch on release.
+struct ObjMove {
     key: u32,
-    idx: usize,
-    orig: Object,
+    /// (index, original object) per moved item.
+    items: Vec<(usize, Object)>,
     grab: Point,
     moved: bool,
 }
+
+const HIT_TOL: f64 = 6.0;
 
 pub struct AppState {
     pub registry_state: RegistryState,
@@ -124,8 +128,16 @@ pub struct AppState {
     focused_output: Option<u32>,
     counter_next: u32,
     text_draft: Option<TextDraft>,
-    text_move: Option<TextMove>,
+    obj_move: Option<ObjMove>,
     last_click: Option<(Instant, u32, usize)>,
+    /// Selected object ids on one output (select tool).
+    selection: Option<(u32, Vec<crate::model::object::ObjectId>)>,
+    /// In-process clipboard for copy/cut/paste/duplicate.
+    clipboard: Vec<Object>,
+    /// Rubber-band in progress: (output, anchor, cursor).
+    marquee: Option<(u32, Point, Point)>,
+    /// Eraser sweep: (output, last sample point, removals in order).
+    erase: Option<(u32, Point, Vec<(usize, Object)>)>,
     pub loop_handle: LoopHandle<'static, AppState>,
     debug_damage: bool,
 }
@@ -177,8 +189,12 @@ impl AppState {
             focused_output: None,
             counter_next: 1,
             text_draft: None,
-            text_move: None,
+            obj_move: None,
             last_click: None,
+            selection: None,
+            clipboard: Vec::new(),
+            marquee: None,
+            erase: None,
             loop_handle,
             debug_damage: std::env::var("ANNOTATE_DEBUG_DAMAGE").is_ok_and(|v| v == "1"),
         })
@@ -241,8 +257,11 @@ impl AppState {
     /// Scenes persist unless auto-clear is on.
     pub fn hide(&mut self) {
         self.commit_text_draft();
-        self.text_move = None;
+        self.obj_move = None;
         self.last_click = None;
+        self.selection = None;
+        self.marquee = None;
+        self.erase = None;
         if !self.overlays.is_empty() {
             self.overlays.clear();
             log::info!("overlay hidden");
@@ -448,7 +467,8 @@ impl AppState {
                 self.record_damage(key, &[bounds]);
             } else {
                 let orig = scene.objects[idx].clone();
-                self.text_move = Some(TextMove { key, idx, orig, grab: pos, moved: false });
+                self.obj_move =
+                    Some(ObjMove { key, items: vec![(idx, orig)], grab: pos, moved: false });
             }
         } else {
             self.last_click = None;
@@ -480,35 +500,220 @@ impl AppState {
         self.record_damage(key, &[bounds]);
     }
 
-    fn handle_text_motion(&mut self, surface_key: u32, pos: Point) -> bool {
-        let Some(tm) = &mut self.text_move else { return false };
-        if tm.key != surface_key {
+    fn handle_move_motion(&mut self, surface_key: u32, pos: Point) -> bool {
+        let Some(mv) = &mut self.obj_move else { return false };
+        if mv.key != surface_key {
             return true;
         }
-        tm.moved = true;
-        let (dx, dy) = (pos.x - tm.grab.x, pos.y - tm.grab.y);
-        let mut moved = tm.orig.clone();
-        moved.kind.translate(dx, dy);
-        moved.recompute_bounds();
-        let (key, idx) = (tm.key, tm.idx);
-        let new_bounds = moved.bounds;
+        mv.moved = true;
+        let (dx, dy) = (pos.x - mv.grab.x, pos.y - mv.grab.y);
+        let key = mv.key;
+        let mut damage = Rect::default();
+        let items = mv.items.clone();
         let scene = self.scenes.entry(key as u64).or_default();
-        let Some(slot) = scene.objects.get_mut(idx) else {
-            self.text_move = None;
-            return true;
-        };
-        let old_bounds = slot.bounds;
-        *slot = moved;
-        self.record_damage(key, &[old_bounds.union(new_bounds)]);
+        for (idx, orig) in items {
+            let mut moved = orig;
+            moved.kind.translate(dx, dy);
+            moved.recompute_bounds();
+            let Some(slot) = scene.objects.get_mut(idx) else { continue };
+            damage = damage.union(slot.bounds).union(moved.bounds);
+            *slot = moved;
+        }
+        self.record_damage(key, &[damage]);
         true
     }
 
-    fn handle_text_release(&mut self) -> bool {
-        let Some(tm) = self.text_move.take() else { return false };
-        if tm.moved {
-            self.undo.record_applied(tm.key as u64, Edit::Replace { at: tm.idx, obj: tm.orig });
+    /// Finish a move drag: one batch inverse, so a single undo restores
+    /// every moved object at once.
+    fn handle_move_release(&mut self) -> bool {
+        let Some(mv) = self.obj_move.take() else { return false };
+        if mv.moved {
+            let inverses: Vec<Edit> =
+                mv.items.into_iter().map(|(at, obj)| Edit::Replace { at, obj }).collect();
+            self.undo.record_applied(mv.key as u64, Edit::Batch(inverses));
         }
         true
+    }
+
+    fn selected_indices(&self, key: u32) -> Vec<usize> {
+        let Some((sel_key, ids)) = &self.selection else { return Vec::new() };
+        if *sel_key != key {
+            return Vec::new();
+        }
+        let Some(scene) = self.scenes.get(&(key as u64)) else { return Vec::new() };
+        let mut idxs: Vec<usize> = ids.iter().filter_map(|id| scene.index_of(*id)).collect();
+        idxs.sort_unstable();
+        idxs
+    }
+
+    fn selection_damage(&mut self) {
+        let Some((key, _)) = self.selection.clone() else { return };
+        let idxs = self.selected_indices(key);
+        let Some(scene) = self.scenes.get(&(key as u64)) else { return };
+        let mut r = Rect::default();
+        for i in idxs {
+            r = r.union(scene.objects[i].bounds);
+        }
+        self.record_damage(key, &[r.inflate(4.0)]);
+    }
+
+    fn handle_select_press(&mut self, key: u32, pos: Point) {
+        self.selection_damage(); // old highlight area repaints
+        let scene = self.scenes.entry(key as u64).or_default();
+        if let Some(idx) = scene.objects.iter().rposition(|o| o.hit_test(pos, HIT_TOL)) {
+            let id = scene.objects[idx].id;
+            let already_selected = self
+                .selection
+                .as_ref()
+                .is_some_and(|(k, ids)| *k == key && ids.contains(&id));
+            if !already_selected {
+                self.selection = Some((key, vec![id]));
+            }
+            let items: Vec<(usize, Object)> = self
+                .selected_indices(key)
+                .into_iter()
+                .map(|i| (i, self.scenes[&(key as u64)].objects[i].clone()))
+                .collect();
+            self.obj_move = Some(ObjMove { key, items, grab: pos, moved: false });
+            self.selection_damage();
+        } else {
+            self.selection = None;
+            self.marquee = Some((key, pos, pos));
+        }
+    }
+
+    fn handle_marquee_motion(&mut self, surface_key: u32, pos: Point) -> bool {
+        let Some((key, anchor, cur)) = &mut self.marquee else { return false };
+        if *key != surface_key {
+            return true;
+        }
+        let old = Rect::from_corners(*anchor, *cur);
+        *cur = pos;
+        let new = Rect::from_corners(*anchor, pos);
+        let (key, damage) = (*key, old.union(new).inflate(2.0));
+        self.record_damage(key, &[damage]);
+        true
+    }
+
+    /// Marquee release: select every object whose bounds intersect the band.
+    fn handle_marquee_release(&mut self) -> bool {
+        let Some((key, anchor, cur)) = self.marquee.take() else { return false };
+        let band = Rect::from_corners(anchor, cur);
+        let scene = self.scenes.entry(key as u64).or_default();
+        let ids: Vec<_> = scene
+            .objects
+            .iter()
+            .filter(|o| band.intersects(o.bounds))
+            .map(|o| o.id)
+            .collect();
+        self.selection = (!ids.is_empty()).then_some((key, ids));
+        self.record_damage(key, &[band.inflate(6.0)]);
+        self.selection_damage();
+        true
+    }
+
+    fn erase_at(&mut self, key: u32, pos: Point) {
+        // Remove everything under the point, topmost first.
+        loop {
+            let scene = self.scenes.entry(key as u64).or_default();
+            let Some(idx) = scene.objects.iter().rposition(|o| o.hit_test(pos, HIT_TOL)) else {
+                return;
+            };
+            let obj = scene.objects.remove(idx);
+            let bounds = obj.bounds;
+            if let Some((_, _, removed)) = &mut self.erase {
+                removed.push((idx, obj));
+            }
+            self.record_damage(key, &[bounds]);
+        }
+    }
+
+    /// Sample the sweep densely between motion events so a fast (or warped)
+    /// pointer can't jump over objects.
+    fn erase_along(&mut self, key: u32, to: Point) {
+        let Some((_, last, _)) = &mut self.erase else { return };
+        let from = *last;
+        *last = to;
+        let dist = from.dist(to);
+        let steps = (dist / (HIT_TOL * 0.8)).ceil().max(1.0) as usize;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let p = Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+            self.erase_at(key, p);
+        }
+    }
+
+    fn handle_erase_release(&mut self) -> bool {
+        let Some((key, _, removed)) = self.erase.take() else { return false };
+        if !removed.is_empty() {
+            // Inverse of sequential removals: re-insert in reverse order.
+            let inverses: Vec<Edit> = removed
+                .into_iter()
+                .rev()
+                .map(|(at, obj)| Edit::Insert { at, obj })
+                .collect();
+            self.undo.record_applied(key as u64, Edit::Batch(inverses));
+        }
+        true
+    }
+
+    /// Delete the current selection as one undoable batch.
+    fn delete_selection(&mut self) {
+        let Some((key, _)) = self.selection.clone() else { return };
+        let idxs = self.selected_indices(key);
+        if idxs.is_empty() {
+            self.selection = None;
+            return;
+        }
+        let scene = self.scenes.entry(key as u64).or_default();
+        let mut damage = Rect::default();
+        for &i in &idxs {
+            damage = damage.union(scene.objects[i].bounds);
+        }
+        let edit = Edit::Batch(idxs.iter().rev().map(|&at| Edit::Remove { at }).collect());
+        self.undo.commit(key as u64, edit, scene);
+        self.selection = None;
+        self.record_damage(key, &[damage.inflate(4.0)]);
+    }
+
+    fn selected_objects(&self) -> Vec<Object> {
+        let Some((key, _)) = self.selection.clone() else { return Vec::new() };
+        let idxs = self.selected_indices(key);
+        let Some(scene) = self.scenes.get(&(key as u64)) else { return Vec::new() };
+        idxs.into_iter().map(|i| scene.objects[i].clone()).collect()
+    }
+
+    /// Paste clones (offset) onto the selection's output or the focused one.
+    fn paste_objects(&mut self, objs: Vec<Object>) {
+        if objs.is_empty() {
+            return;
+        }
+        let Some(key) = self
+            .selection
+            .as_ref()
+            .map(|(k, _)| *k)
+            .or(self.focused_output)
+            .or_else(|| self.overlays.keys().next().copied())
+        else {
+            return;
+        };
+        let scene = self.scenes.entry(key as u64).or_default();
+        let mut edits = Vec::new();
+        let mut new_ids = Vec::new();
+        let mut damage = Rect::default();
+        let base = scene.len();
+        for (i, mut obj) in objs.into_iter().enumerate() {
+            obj.kind.translate(16.0, 16.0);
+            obj.id = scene.alloc_id();
+            obj.recompute_bounds();
+            damage = damage.union(obj.bounds);
+            new_ids.push(obj.id);
+            edits.push(Edit::Insert { at: base + i, obj });
+        }
+        self.undo.commit(key as u64, Edit::Batch(edits), self.scenes.entry(key as u64).or_default());
+        self.selection = Some((key, new_ids));
+        self.record_damage(key, &[damage.inflate(4.0)]);
+        self.selection_damage();
     }
 
     pub fn dispatch(&mut self, action: Action) {
@@ -516,6 +721,10 @@ impl AppState {
             Action::SelectTool(tool) => {
                 if tool != Tool::Text {
                     self.commit_text_draft();
+                }
+                if tool != Tool::Select && self.selection.is_some() {
+                    self.selection_damage();
+                    self.selection = None;
                 }
                 self.input.tool = tool;
                 log::debug!("tool: {}", tool.name());
@@ -573,6 +782,28 @@ impl AppState {
             Action::CounterReset => {
                 self.counter_next = 1;
             }
+            Action::Copy => {
+                let objs = self.selected_objects();
+                if !objs.is_empty() {
+                    self.clipboard = objs;
+                }
+            }
+            Action::Cut => {
+                let objs = self.selected_objects();
+                if !objs.is_empty() {
+                    self.clipboard = objs;
+                    self.delete_selection();
+                }
+            }
+            Action::Paste => {
+                let objs = self.clipboard.clone();
+                self.paste_objects(objs);
+            }
+            Action::Duplicate => {
+                let objs = self.selected_objects();
+                self.paste_objects(objs);
+            }
+            Action::DeleteSelection => self.delete_selection(),
         }
     }
 
@@ -648,10 +879,23 @@ impl AppState {
                     _ if self.active_drag == Some(*key) => (preview.as_ref(), false),
                     _ => (None, false),
                 };
+                let marquee = self
+                    .marquee
+                    .filter(|(mk, _, _)| mk == key)
+                    .map(|(_, a, b)| Rect::from_corners(a, b));
+                let selection: Vec<Rect> = match &self.selection {
+                    Some((sk, ids)) if sk == key => ids
+                        .iter()
+                        .filter_map(|id| scene.index_of(*id).map(|i| scene.objects[i].bounds))
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 let ctx = FrameCtx {
                     scene,
                     preview: preview_here,
                     caret,
+                    marquee,
+                    selection,
                     board: self.board,
                     board_opacity: self.board_opacity,
                     ui: ui_layouts.get(key).map(|layout| {
@@ -1013,13 +1257,31 @@ impl PointerHandler for AppState {
                             self.handle_counter_press(surface_key, pos);
                             continue;
                         }
+                        Tool::Select => {
+                            self.handle_select_press(surface_key, pos);
+                            continue;
+                        }
+                        Tool::Eraser => {
+                            self.erase = Some((surface_key, pos, Vec::new()));
+                            self.erase_at(surface_key, pos);
+                            continue;
+                        }
                         _ => {}
                     }
                     self.active_drag = Some(surface_key);
                     (surface_key, self.input.on_press(pos, &style))
                 }
                 Motion { .. } => {
-                    if self.handle_text_motion(surface_key, pos) {
+                    if self.handle_move_motion(surface_key, pos) {
+                        continue;
+                    }
+                    if self.handle_marquee_motion(surface_key, pos) {
+                        continue;
+                    }
+                    if let Some((ek, _, _)) = self.erase {
+                        if ek == surface_key {
+                            self.erase_along(surface_key, pos);
+                        }
                         continue;
                     }
                     if self.input.drag == Drag::UiSlider {
@@ -1038,7 +1300,13 @@ impl PointerHandler for AppState {
                     (key, self.input.on_motion(pos, &style))
                 }
                 Release { button: BTN_LEFT, .. } => {
-                    if self.handle_text_release() {
+                    if self.handle_move_release() {
+                        continue;
+                    }
+                    if self.handle_marquee_release() {
+                        continue;
+                    }
+                    if self.handle_erase_release() {
                         continue;
                     }
                     if self.input.drag == Drag::UiSlider {

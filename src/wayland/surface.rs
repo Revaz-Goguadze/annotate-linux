@@ -36,6 +36,10 @@ pub struct FrameCtx<'a> {
     pub board_opacity: f64,
     /// Draw an end-of-text caret on the preview (open text draft).
     pub caret: bool,
+    /// Rubber-band rectangle in progress on this output.
+    pub marquee: Option<Rect>,
+    /// Bounds of selected objects on this output (dashed highlight).
+    pub selection: Vec<Rect>,
     /// Present only on the output that shows the toolbar.
     pub ui: Option<(&'a UiLayout, UiPaintCtx<'a>)>,
     pub debug_damage: bool,
@@ -204,6 +208,21 @@ impl Overlay {
                         crate::render::text::paint_caret(cr, p);
                     }
                 }
+            }
+
+            // dashed chrome: selection highlights + marquee band
+            if !ctx.selection.is_empty() || ctx.marquee.is_some() {
+                cr.set_source_rgba(0.45, 0.65, 0.95, 0.95);
+                cr.set_line_width(1.5);
+                cr.set_dash(&[6.0, 4.0], 0.0);
+                for r in &ctx.selection {
+                    cr.rectangle(r.x, r.y, r.w, r.h);
+                }
+                if let Some(m) = &ctx.marquee {
+                    cr.rectangle(m.x, m.y, m.w, m.h);
+                }
+                cr.stroke().expect("dashed chrome");
+                cr.set_dash(&[], 0.0);
             }
 
             if let Some((layout, paint_ctx)) = &ctx.ui {

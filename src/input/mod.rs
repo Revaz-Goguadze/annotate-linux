@@ -17,6 +17,8 @@ pub enum Tool {
     Ellipse,
     Counter,
     Text,
+    Select,
+    Eraser,
 }
 
 impl Tool {
@@ -30,6 +32,8 @@ impl Tool {
             Tool::Ellipse => "ellipse",
             Tool::Counter => "counter",
             Tool::Text => "text",
+            Tool::Select => "select",
+            Tool::Eraser => "eraser",
         }
     }
 
@@ -43,6 +47,8 @@ impl Tool {
             "ellipse" | "circle" => Tool::Ellipse,
             "counter" => Tool::Counter,
             "text" => Tool::Text,
+            "select" => Tool::Select,
+            "eraser" => Tool::Eraser,
             _ => return None,
         })
     }
@@ -60,6 +66,11 @@ pub enum Action {
     ToggleWidthPicker,
     CycleBoard,
     CounterReset,
+    Copy,
+    Cut,
+    Paste,
+    Duplicate,
+    DeleteSelection,
 }
 
 /// The in-progress pointer drag.
@@ -104,7 +115,9 @@ impl InputState {
     pub fn on_press(&mut self, pos: Point, style: &Style) -> DragUpdate {
         self.drag = match self.tool {
             Tool::Pen | Tool::Highlighter => Drag::Stroke { pts: vec![pos] },
-            Tool::Counter | Tool::Text => return DragUpdate::default(),
+            Tool::Counter | Tool::Text | Tool::Select | Tool::Eraser => {
+                return DragUpdate::default();
+            }
             _ => Drag::Shape { anchor: pos, cur: pos },
         };
         DragUpdate {
@@ -200,6 +213,10 @@ pub mod keymap {
                 Keysym::Z => Some(Action::Redo),
                 Keysym::z => Some(Action::Undo),
                 Keysym::r | Keysym::R => Some(Action::CounterReset),
+                Keysym::c | Keysym::C => Some(Action::Copy),
+                Keysym::x | Keysym::X => Some(Action::Cut),
+                Keysym::v | Keysym::V => Some(Action::Paste),
+                Keysym::d | Keysym::D => Some(Action::Duplicate),
                 _ => None,
             };
         }
@@ -213,10 +230,12 @@ pub mod keymap {
             Keysym::e => Action::SelectTool(Tool::Ellipse),
             Keysym::t => Action::SelectTool(Tool::Text),
             Keysym::n => Action::SelectTool(Tool::Counter),
+            Keysym::s => Action::SelectTool(Tool::Select),
+            Keysym::x => Action::SelectTool(Tool::Eraser),
             Keysym::c => Action::ToggleColorPicker,
             Keysym::w => Action::ToggleWidthPicker,
             Keysym::b => Action::CycleBoard,
-            Keysym::Delete => Action::Clear,
+            Keysym::Delete => Action::DeleteSelection,
             _ => return None,
         })
     }

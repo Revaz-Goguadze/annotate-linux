@@ -151,6 +151,26 @@ fn icon(cr: &cairo::Context, b: UiButton, r: Rect, ctx: &UiPaintCtx) {
             cr.move_to(cx - ext.width() / 2.0 - ext.x_bearing(), cy + ext.height() / 2.0);
             cr.show_text("T").unwrap();
         }
+        UiButton::Tool(Tool::Select) => {
+            // cursor-arrow glyph
+            cr.move_to(x0 + 2.0, y0);
+            cr.line_to(x0 + 2.0, y1 - 2.0);
+            cr.line_to(x0 + 7.0, y1 - 7.0);
+            cr.line_to(x0 + 11.0, y1);
+            cr.line_to(x0 + 14.0, y1 - 3.0);
+            cr.line_to(x0 + 9.0, y1 - 10.0);
+            cr.line_to(x1 - 4.0, y1 - 10.0);
+            cr.close_path();
+            cr.fill().unwrap();
+        }
+        UiButton::Tool(Tool::Eraser) => {
+            cr.save().unwrap();
+            cr.translate((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            cr.rotate(-0.6);
+            cr.rectangle(-9.0, -6.0, 18.0, 12.0);
+            cr.restore().unwrap();
+            cr.stroke().unwrap();
+        }
         UiButton::ColorSwatch => {
             let c = ctx.palette[ctx.color_idx];
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);

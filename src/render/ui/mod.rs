@@ -12,7 +12,7 @@ pub const PAD: f64 = 8.0;
 pub const SWATCH: f64 = 28.0;
 const TRACK_W: f64 = 240.0;
 
-pub const TOOLS: [Tool; 8] = [
+pub const TOOLS: [Tool; 10] = [
     Tool::Pen,
     Tool::Highlighter,
     Tool::Line,
@@ -21,6 +21,8 @@ pub const TOOLS: [Tool; 8] = [
     Tool::Ellipse,
     Tool::Counter,
     Tool::Text,
+    Tool::Select,
+    Tool::Eraser,
 ];
 
 #[derive(Default, Debug)]
@@ -185,7 +187,7 @@ mod tests {
         let l = layout(SURFACE, 8, &UiState::default());
         assert!((l.toolbar.x + l.toolbar.w / 2.0 - 800.0).abs() < 1e-9);
         assert!(l.toolbar.y + l.toolbar.h < SURFACE.h);
-        assert_eq!(l.buttons.len(), 11);
+        assert_eq!(l.buttons.len(), 13);
         for (_, r) in &l.buttons {
             assert!(l.toolbar.contains(Point::new(r.x, r.y)));
             assert!(l.toolbar.contains(Point::new(r.x + r.w, r.y + r.h)));
