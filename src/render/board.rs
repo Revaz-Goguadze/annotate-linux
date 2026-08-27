@@ -16,24 +16,13 @@ impl BoardKind {
             BoardKind::Black => BoardKind::None,
         }
     }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            BoardKind::None => "none",
-            BoardKind::White => "white",
-            BoardKind::Black => "black",
-        }
-    }
-
-    pub fn from_name(s: &str) -> Option<Self> {
-        Some(match s {
-            "none" | "off" => BoardKind::None,
-            "white" | "whiteboard" => BoardKind::White,
-            "black" | "blackboard" => BoardKind::Black,
-            _ => return None,
-        })
-    }
 }
+
+crate::named_enum!(BoardKind {
+    BoardKind::None => "none" | "off",
+    BoardKind::White => "white" | "whiteboard",
+    BoardKind::Black => "black" | "blackboard",
+});
 
 /// Fill the (already clipped) frame with the board color. Runs after the
 /// transparent Source-clear, before objects.

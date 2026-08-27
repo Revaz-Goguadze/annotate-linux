@@ -4,12 +4,10 @@
 
 use crate::model::geom::Point;
 use crate::model::object::{Object, ObjectKind};
-
-pub const FONT_FAMILY: &str = "Sans";
+use crate::render::draw;
 
 fn select_font(cr: &cairo::Context, px: f64) {
-    cr.select_font_face(FONT_FAMILY, cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-    cr.set_font_size(px);
+    draw::select_font(cr, px, cairo::FontWeight::Normal);
 }
 
 /// Paint a Text object. `at` is the top-left corner.
@@ -21,16 +19,11 @@ pub fn paint_text(cr: &cairo::Context, at: Point, s: &str, px: f64) {
 
 /// Paint a Counter badge: filled circle + centered number in white.
 pub fn paint_counter(cr: &cairo::Context, at: Point, n: u32, r: f64) {
-    cr.new_path();
-    cr.arc(at.x, at.y, r, 0.0, std::f64::consts::TAU);
+    draw::circle(cr, at.x, at.y, r);
     cr.fill().expect("badge");
-    let label = n.to_string();
-    let px = r * 1.1;
-    select_font(cr, px);
-    let ext = cr.text_extents(&label).expect("extents");
+    select_font(cr, r * 1.1);
     cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.move_to(at.x - ext.width() / 2.0 - ext.x_bearing(), at.y + ext.height() / 2.0);
-    cr.show_text(&label).expect("badge label");
+    draw::centered_text(cr, at.x, at.y, &n.to_string());
 }
 
 /// Caret after the last character of a Text draft.

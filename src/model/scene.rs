@@ -1,3 +1,4 @@
+use crate::model::geom::Rect;
 use crate::model::object::{Object, ObjectId};
 
 /// Z-ordered annotation objects (index == z, last drawn on top).
@@ -27,6 +28,44 @@ impl Scene {
 
     pub fn index_of(&self, id: ObjectId) -> Option<usize> {
         self.objects.iter().position(|o| o.id == id)
+    }
+
+    /// Union of the bounds of the objects at `idxs`, for damage of a group
+    /// operation. Out-of-range indices are skipped; empty input gives an
+    /// empty rect.
+    pub fn bounds_union(&self, idxs: impl IntoIterator<Item = usize>) -> Rect {
+        idxs.into_iter()
+            .filter_map(|i| self.objects.get(i))
+            .fold(Rect::default(), |acc, o| acc.union(o.bounds))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::geom::Point;
+    use crate::model::object::{ObjectKind, Style};
+    use crate::util::color::Rgba;
+
+    fn scene_with_rects(rects: &[Rect]) -> Scene {
+        let mut scene = Scene::new();
+        for r in rects {
+            let id = scene.alloc_id();
+            let style = Style { stroke: Rgba::new(0.0, 0.0, 0.0, 1.0), width: 0.0, group_alpha: 1.0 };
+            scene.objects.push(Object::new(id, ObjectKind::Rect { r: *r }, style));
+        }
+        scene
+    }
+
+    #[test]
+    fn bounds_union_covers_listed_objects_only() {
+        let scene = scene_with_rects(&[Rect::new(0.0, 0.0, 10.0, 10.0), Rect::new(100.0, 0.0, 10.0, 10.0)]);
+        let r = scene.bounds_union([0]);
+        assert!(r.contains(Point::new(5.0, 5.0)));
+        assert!(!r.contains(Point::new(105.0, 5.0)));
+        let both = scene.bounds_union([0, 1, 9]);
+        assert!(both.contains(Point::new(105.0, 5.0)));
+        assert_eq!(scene.bounds_union([]), Rect::default());
     }
 }
 

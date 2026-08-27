@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::util::xdg;
+use crate::util::{toml_file, xdg};
 
 /// User configuration, read from `~/.config/annotate-linux/config.toml`.
 /// Every field has a default; a missing file means all defaults.
@@ -119,17 +119,14 @@ impl Config {
     }
 
     pub fn load_from(path: &Path) -> Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
-                let de = toml::Deserializer::parse(&text)?;
-                let cfg: Config = serde_ignored::deserialize(de, |unknown| {
-                    log::warn!("config: unknown key `{unknown}` in {} (ignored)", path.display());
-                })?;
-                Ok(cfg)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
-        }
+        let Some(text) = toml_file::read_opt(path)? else {
+            return Ok(Self::default());
+        };
+        let de = toml::Deserializer::parse(&text)?;
+        let cfg: Config = serde_ignored::deserialize(de, |unknown| {
+            log::warn!("config: unknown key `{unknown}` in {} (ignored)", path.display());
+        })?;
+        Ok(cfg)
     }
 }
 

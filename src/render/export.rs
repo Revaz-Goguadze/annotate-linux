@@ -7,8 +7,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::model::scene::Scene;
-use crate::render::board::{self, BoardKind};
-use crate::render::objects::paint_object;
+use crate::render::board::BoardKind;
+use crate::render::frame::FrameCtx;
 
 pub fn export_png(
     path: &Path,
@@ -25,10 +25,7 @@ pub fn export_png(
     {
         let cr = cairo::Context::new(&surf)?;
         cr.scale(scale, scale);
-        board::paint(&cr, board, board_opacity);
-        for obj in &scene.objects {
-            paint_object(&cr, obj, 1.0);
-        }
+        FrameCtx::still(scene, board, board_opacity).paint(&cr, None);
     }
     // Screen captures are private. OpenOptions.mode is only used when the
     // path is created; an existing world-readable file would keep those
