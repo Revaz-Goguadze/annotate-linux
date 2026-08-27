@@ -53,6 +53,8 @@ use crate::util::color::Rgba;
 const BTN_LEFT: u32 = 0x110;
 const WIDTH_MIN: f64 = 0.5;
 const WIDTH_MAX: f64 = 20.0;
+/// Upper bound on palette entries, so ad-hoc colors cannot grow it forever.
+const PALETTE_MAX: usize = 64;
 /// Highlighter strokes are drawn thicker than the pen at the same setting.
 const HIGHLIGHTER_WIDTH_FACTOR: f64 = 3.0;
 
@@ -1258,8 +1260,17 @@ impl AppState {
         } else {
             let rgba = Rgba::parse(value)?;
             // ad-hoc colors are appended so the index stays meaningful
-            self.palette.push(rgba);
-            self.color_idx = self.palette.len() - 1;
+            match self.palette.iter().position(|c| *c == rgba) {
+                Some(idx) => self.color_idx = idx,
+                None => {
+                    anyhow::ensure!(
+                        self.palette.len() < PALETTE_MAX,
+                        "palette is full ({PALETTE_MAX} colors); pick one by index"
+                    );
+                    self.palette.push(rgba);
+                    self.color_idx = self.palette.len() - 1;
+                }
+            }
         }
         self.mark_state_dirty();
         self.damage_ui();
@@ -1274,6 +1285,7 @@ impl AppState {
         } else {
             value.parse::<f64>()?
         };
+        anyhow::ensure!(new.is_finite(), "width must be a finite number");
         self.width = new.clamp(WIDTH_MIN, WIDTH_MAX);
         self.mark_state_dirty();
         self.damage_ui();
@@ -1294,7 +1306,7 @@ impl AppState {
             }
             Command::Mode { fade, seconds } => (|| {
                 if let Some(s) = seconds {
-                    anyhow::ensure!(s > 0.0, "seconds must be positive");
+                    anyhow::ensure!(s.is_finite() && s > 0.0, "seconds must be a finite positive number");
                     self.fade_seconds = s;
                 }
                 if let Some(f) = fade {

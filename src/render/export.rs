@@ -1,6 +1,7 @@
 //! Render a scene to a PNG file (transparent background unless a board is
 //! active) at full device resolution.
 
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -29,7 +30,14 @@ pub fn export_png(
             paint_object(&cr, obj, 1.0);
         }
     }
-    let mut file = std::fs::File::create(path)
+    // A screen annotation capture is private: 0600 on create, never the
+    // umask default that leaves it world-readable.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
         .with_context(|| format!("creating {}", path.display()))?;
     surf.write_to_png(&mut file)
         .with_context(|| format!("writing {}", path.display()))?;

@@ -3,7 +3,7 @@
 //! with a short read timeout so a stalled client cannot wedge the loop.
 
 use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -19,6 +19,9 @@ use super::socket_path;
 use crate::wayland::state::AppState;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
+/// Cap on one request line: a client cannot make the daemon buffer
+/// unbounded memory by never sending a newline.
+const MAX_REQUEST: u64 = 64 * 1024;
 
 /// Removes the socket file when the daemon exits.
 pub struct SocketGuard {
@@ -48,6 +51,9 @@ pub fn setup(handle: &LoopHandle<AppState>) -> Result<SocketGuard> {
     }
 
     let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
+    // Commands drive the overlay and can write files: owner-only access,
+    // on the socket as well as the directory holding it.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     listener.set_nonblocking(true)?;
 
     handle
@@ -79,8 +85,12 @@ fn handle_client(stream: UnixStream, app: &mut AppState) {
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    let response = match reader.read_line(&mut line) {
+    let read = (&mut reader).take(MAX_REQUEST).read_line(&mut line);
+    let response = match read {
         Ok(0) => return,
+        Ok(n) if n as u64 == MAX_REQUEST && !line.ends_with('\n') => {
+            Response::Error { message: format!("command longer than {MAX_REQUEST} bytes") }
+        }
         Ok(_) => match serde_json::from_str::<Command>(line.trim_end()) {
             Ok(cmd) => {
                 log::debug!("ipc: {cmd:?}");

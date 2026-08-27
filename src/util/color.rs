@@ -13,17 +13,23 @@ impl Rgba {
         Self { r, g, b, a }
     }
 
-    /// Parse `#rrggbb` or `#rrggbbaa`.
+    /// Parse `#rrggbb` or `#rrggbbaa`. ASCII hex digits only: length and
+    /// alphabet are checked before any indexing, so multi-byte input can
+    /// never slice mid-character.
     pub fn parse(s: &str) -> Result<Self> {
-        let hex = s.strip_prefix('#').unwrap_or(s);
-        let byte = |i: usize| -> Result<f64> {
-            Ok(u8::from_str_radix(&hex[i..i + 2], 16).map(|v| v as f64 / 255.0)?)
-        };
-        match hex.len() {
-            6 => Ok(Self::new(byte(0)?, byte(2)?, byte(4)?, 1.0)),
-            8 => Ok(Self::new(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
-            _ => bail!("bad color {s:?}: expected #rrggbb or #rrggbbaa"),
+        let hex = s.strip_prefix('#').unwrap_or(s).as_bytes();
+        if !matches!(hex.len(), 6 | 8) || !hex.iter().all(|b| b.is_ascii_hexdigit()) {
+            bail!("bad color {s:?}: expected #rrggbb or #rrggbbaa");
         }
+        let byte = |i: usize| -> f64 {
+            let nibble = |b: u8| f64::from((b as char).to_digit(16).unwrap_or(0));
+            (nibble(hex[i]) * 16.0 + nibble(hex[i + 1])) / 255.0
+        };
+        Ok(if hex.len() == 6 {
+            Self::new(byte(0), byte(2), byte(4), 1.0)
+        } else {
+            Self::new(byte(0), byte(2), byte(4), byte(6))
+        })
     }
 
     pub fn to_hex(self) -> String {
@@ -49,5 +55,14 @@ mod tests {
         assert_eq!((c.r, c.g, c.b), (1.0, 0.0, 0.0));
         assert!((c.a - 128.0 / 255.0).abs() < 1e-9);
         assert!(Rgba::parse("#12345").is_err());
+    }
+
+    #[test]
+    fn non_hex_input_is_rejected_not_panicked() {
+        // Six-byte, three-char strings used to slice mid-character.
+        assert!(Rgba::parse("€00000").is_err());
+        assert!(Rgba::parse("#€00000").is_err());
+        assert!(Rgba::parse("zzzzzz").is_err());
+        assert!(Rgba::parse("#ff 000").is_err());
     }
 }
