@@ -158,4 +158,72 @@ mod tests {
         let cfg = Config::load_from(Path::new("/nonexistent/annotate-test/config.toml")).unwrap();
         assert_eq!(cfg, Config::default());
     }
+
+    fn write_config(name: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("annotate-cfg-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_file_overrides_only_the_keys_it_sets() {
+        let path = write_config(
+            "override",
+            r##"
+[general]
+fade_default = true
+fade_seconds = 1.5
+
+[appearance]
+palette = ["#123456"]
+
+[cursor]
+style = "crosshair"
+ripple = true
+
+[keys]
+"ctrl+shift+z" = "redo"
+"p" = ""
+"##,
+        );
+        let cfg = Config::load_from(&path).unwrap();
+        assert!(cfg.general.fade_default);
+        assert_eq!(cfg.general.fade_seconds, 1.5);
+        assert_eq!(cfg.general.namespace, "annotate-linux", "untouched keys keep defaults");
+        assert_eq!(cfg.appearance.palette, vec!["#123456"]);
+        assert_eq!(cfg.appearance.text_px, 24.0);
+        assert_eq!(cfg.cursor.style, "crosshair");
+        assert!(cfg.cursor.ripple && !cfg.cursor.highlight);
+        assert_eq!(cfg.keys.get("ctrl+shift+z").map(String::as_str), Some("redo"));
+        assert_eq!(cfg.keys.get("p").map(String::as_str), Some(""), "empty value unbinds");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn unknown_keys_are_tolerated() {
+        let path = write_config("unknown", "[general]\nnope = 1\n\n[nonsense]\nx = true\n");
+        assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn malformed_toml_and_wrong_types_are_errors() {
+        for (name, text) in
+            [("syntax", "[general\n"), ("types", "[appearance]\ndefault_width = \"wide\"\n")]
+        {
+            let path = write_config(name, text);
+            assert!(Config::load_from(&path).is_err(), "{name} should not load");
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn a_directory_in_place_of_the_config_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("annotate-cfg-{}-dir", std::process::id()));
+        std::fs::create_dir_all(dir.join("config.toml")).unwrap();
+        assert!(Config::load_from(&dir.join("config.toml")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
