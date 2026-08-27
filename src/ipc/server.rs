@@ -30,7 +30,11 @@ pub struct SocketGuard {
 
 impl Drop for SocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if let Err(e) = fs::remove_file(&self.path)
+            && e.kind() != ErrorKind::NotFound
+        {
+            log::warn!("removing socket {} failed: {e}", self.path.display());
+        }
     }
 }
 
@@ -79,9 +83,16 @@ pub fn setup(handle: &LoopHandle<AppState>) -> Result<SocketGuard> {
 }
 
 fn handle_client(stream: UnixStream, app: &mut AppState) {
-    let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
+    // The timeouts are what keep a stalled client from wedging the event
+    // loop; a socket we cannot configure is dropped rather than risked.
+    let setup = stream
+        .set_nonblocking(false)
+        .and_then(|()| stream.set_read_timeout(Some(READ_TIMEOUT)))
+        .and_then(|()| stream.set_write_timeout(Some(READ_TIMEOUT)));
+    if let Err(e) = setup {
+        log::warn!("ipc client socket setup failed, dropping client: {e}");
+        return;
+    }
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();

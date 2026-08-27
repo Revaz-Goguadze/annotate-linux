@@ -103,6 +103,27 @@ struct ObjMove {
 
 const HIT_TOL: f64 = 6.0;
 
+/// Parse configured palette colors, warning on (and skipping) invalid ones.
+fn parse_palette(specs: &[String]) -> Vec<Rgba> {
+    specs
+        .iter()
+        .filter_map(|s| match Rgba::parse(s) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("config: invalid palette color {s:?} skipped: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
+fn cursor_style_or_default(name: &str) -> CursorStyle {
+    CursorStyle::from_name(name).unwrap_or_else(|| {
+        log::warn!("config: unknown cursor style {name:?}, using default");
+        CursorStyle::default()
+    })
+}
+
 pub struct AppState {
     pub registry_state: RegistryState,
     pub seat_state: SeatState,
@@ -175,16 +196,18 @@ impl AppState {
         loop_handle: LoopHandle<'static, AppState>,
         config: Config,
     ) -> Result<Self> {
-        let palette: Vec<Rgba> = config
-            .appearance
-            .palette
-            .iter()
-            .filter_map(|s| Rgba::parse(s).ok())
-            .collect();
-        let palette = if palette.is_empty() { vec![Rgba::new(0.9, 0.2, 0.2, 1.0)] } else { palette };
+        let palette = parse_palette(&config.appearance.palette);
+        let palette = if palette.is_empty() {
+            if !config.appearance.palette.is_empty() {
+                log::warn!("config: no valid palette colors, using fallback red");
+            }
+            vec![Rgba::new(0.9, 0.2, 0.2, 1.0)]
+        } else {
+            palette
+        };
         let board_opacity = config.appearance.board_opacity.clamp(0.1, 1.0);
         let keymap = Keymap::with_overrides(&config.keys)?;
-        let cursor_style = CursorStyle::from_name(&config.cursor.style).unwrap_or_default();
+        let cursor_style = cursor_style_or_default(&config.cursor.style);
         let cursor_highlight = config.cursor.highlight;
 
         // Restore last session's tool/color/width/board/fade.
@@ -192,26 +215,37 @@ impl AppState {
         // Restoring a non-drawing tool reads as "drawing is broken" after a
         // restart — those start back on the pen.
         let tool = match Tool::from_name(&saved.tool) {
-            Some(Tool::Eraser) | Some(Tool::Select) | None => Tool::Pen,
+            Some(Tool::Eraser) | Some(Tool::Select) => Tool::Pen,
+            None => {
+                log::warn!("state: unknown saved tool {:?}, starting on pen", saved.tool);
+                Tool::Pen
+            }
             Some(t) => t,
         };
         let mut palette = palette;
         let color_idx = if saved.color.is_empty() {
             0
-        } else if let Ok(c) = Rgba::parse(&saved.color) {
-            palette.iter().position(|p| *p == c).unwrap_or_else(|| {
-                palette.push(c);
-                palette.len() - 1
-            })
         } else {
-            0
+            match Rgba::parse(&saved.color) {
+                Ok(c) => palette.iter().position(|p| *p == c).unwrap_or_else(|| {
+                    palette.push(c);
+                    palette.len() - 1
+                }),
+                Err(e) => {
+                    log::warn!("state: invalid saved color {:?} ({e}), using palette default", saved.color);
+                    0
+                }
+            }
         };
         let width = if saved.width > 0.0 {
             saved.width.clamp(WIDTH_MIN, WIDTH_MAX)
         } else {
             config.appearance.default_width
         };
-        let board = BoardKind::from_name(&saved.board).unwrap_or(BoardKind::None);
+        let board = BoardKind::from_name(&saved.board).unwrap_or_else(|| {
+            log::warn!("state: unknown saved board {:?}, using none", saved.board);
+            BoardKind::None
+        });
         let fade_enabled = saved.fade || config.general.fade_default;
         let fade_seconds = config.general.fade_seconds;
         Ok(Self {
@@ -451,7 +485,7 @@ impl AppState {
             return;
         }
         self.state_timer = true;
-        let _ = self.loop_handle.insert_source(
+        let armed = self.loop_handle.insert_source(
             Timer::from_duration(Duration::from_millis(750)),
             |_, _, state: &mut AppState| {
                 state.state_timer = false;
@@ -468,22 +502,29 @@ impl AppState {
                 TimeoutAction::Drop
             },
         );
+        if let Err(e) = armed {
+            self.state_timer = false;
+            log::error!("arming state save timer failed (state not persisted): {e}");
+        }
     }
 
     /// Re-read config.toml and apply what can change at runtime.
     fn reload_config(&mut self) -> Result<()> {
         let config = Config::load()?;
         let keymap = Keymap::with_overrides(&config.keys)?;
-        let palette: Vec<Rgba> =
-            config.appearance.palette.iter().filter_map(|s| Rgba::parse(s).ok()).collect();
-        if !palette.is_empty() {
+        let palette = parse_palette(&config.appearance.palette);
+        if palette.is_empty() {
+            if !config.appearance.palette.is_empty() {
+                log::warn!("config: no valid palette colors, keeping current palette");
+            }
+        } else {
             self.palette = palette;
             self.color_idx = self.color_idx.min(self.palette.len() - 1);
         }
         self.keymap = keymap;
         self.board_opacity = config.appearance.board_opacity.clamp(0.1, 1.0);
         self.fade_seconds = config.general.fade_seconds;
-        self.cursor_style = CursorStyle::from_name(&config.cursor.style).unwrap_or_default();
+        self.cursor_style = cursor_style_or_default(&config.cursor.style);
         self.cursor_highlight = config.cursor.highlight;
         self.config = config;
         self.damage_all();
@@ -500,11 +541,15 @@ impl AppState {
             return;
         }
         self.fade_timer = true;
-        let _ = self
+        let armed = self
             .loop_handle
             .insert_source(Timer::from_duration(TICK), |_, _, state: &mut AppState| {
                 state.on_fade_tick()
             });
+        if let Err(e) = armed {
+            self.fade_timer = false;
+            log::error!("arming fade timer failed (annotations will not fade): {e}");
+        }
     }
 
     fn on_fade_tick(&mut self) -> TimeoutAction {
@@ -564,11 +609,15 @@ impl AppState {
             return;
         }
         self.fx_timer = true;
-        let _ = self
+        let armed = self
             .loop_handle
             .insert_source(Timer::from_duration(TICK), |_, _, state: &mut AppState| {
                 state.on_fx_tick()
             });
+        if let Err(e) = armed {
+            self.fx_timer = false;
+            log::error!("arming cursor fx timer failed (ripples frozen): {e}");
+        }
     }
 
     fn on_fx_tick(&mut self) -> TimeoutAction {
@@ -1578,10 +1627,15 @@ impl SeatHandler for AppState {
                     self.loop_handle.clone(),
                     Box::new(|state, _kbd, event| state.on_repeat_key(event)),
                 )
+                .inspect_err(|e| log::error!("keyboard setup failed (keys will not work): {e}"))
                 .ok();
         }
         if capability == Capability::Pointer && self.pointer.is_none() {
-            self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+            self.pointer = self
+                .seat_state
+                .get_pointer(qh, &seat)
+                .inspect_err(|e| log::error!("pointer setup failed (drawing will not work): {e}"))
+                .ok();
         }
     }
 
