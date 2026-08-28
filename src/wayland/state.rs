@@ -105,17 +105,34 @@ struct ObjMove {
 const HIT_TOL: f64 = 6.0;
 
 /// Parse configured palette colors, warning on (and skipping) invalid ones.
+/// Caps at PALETTE_MAX so a huge config cannot grow the toolbar forever.
 fn parse_palette(specs: &[String]) -> Vec<Rgba> {
-    specs
-        .iter()
-        .filter_map(|s| match Rgba::parse(s) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                log::warn!("config: invalid palette color {s:?} skipped: {e}");
-                None
+    let mut out = Vec::new();
+    for s in specs {
+        match Rgba::parse(s) {
+            Ok(c) => {
+                if out.len() >= PALETTE_MAX {
+                    log::warn!("config: palette truncated to {PALETTE_MAX} colors");
+                    break;
+                }
+                out.push(c);
             }
-        })
-        .collect()
+            Err(e) => log::warn!("config: invalid palette color {s:?} skipped: {e}"),
+        }
+    }
+    out
+}
+
+/// Index of `c` in `palette`, appending when new and under PALETTE_MAX.
+fn try_adopt_color(palette: &mut Vec<Rgba>, c: Rgba) -> Option<usize> {
+    if let Some(i) = palette.iter().position(|p| *p == c) {
+        return Some(i);
+    }
+    if palette.len() >= PALETTE_MAX {
+        return None;
+    }
+    palette.push(c);
+    Some(palette.len() - 1)
 }
 
 fn cursor_style_or_default(name: &str) -> CursorStyle {
@@ -228,9 +245,12 @@ impl AppState {
             0
         } else {
             match Rgba::parse(&saved.color) {
-                Ok(c) => palette.iter().position(|p| *p == c).unwrap_or_else(|| {
-                    palette.push(c);
-                    palette.len() - 1
+                Ok(c) => try_adopt_color(&mut palette, c).unwrap_or_else(|| {
+                    log::warn!(
+                        "state: saved color {:?} dropped, palette is full ({PALETTE_MAX})",
+                        saved.color
+                    );
+                    0
                 }),
                 Err(e) => {
                     log::warn!("state: invalid saved color {:?} ({e}), using palette default", saved.color);
@@ -1304,17 +1324,9 @@ impl AppState {
         } else {
             let rgba = Rgba::parse(value)?;
             // ad-hoc colors are appended so the index stays meaningful
-            match self.palette.iter().position(|c| *c == rgba) {
-                Some(idx) => self.color_idx = idx,
-                None => {
-                    anyhow::ensure!(
-                        self.palette.len() < PALETTE_MAX,
-                        "palette is full ({PALETTE_MAX} colors); pick one by index"
-                    );
-                    self.palette.push(rgba);
-                    self.color_idx = self.palette.len() - 1;
-                }
-            }
+            self.color_idx = try_adopt_color(&mut self.palette, rgba).ok_or_else(|| {
+                anyhow::anyhow!("palette is full ({PALETTE_MAX} colors); pick one by index")
+            })?;
         }
         self.mark_state_dirty();
         self.damage_ui();
@@ -1848,3 +1860,40 @@ delegate_keyboard!(AppState);
 delegate_pointer!(AppState);
 delegate_layer!(AppState);
 delegate_registry!(AppState);
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    fn hex(s: &str) -> Rgba {
+        Rgba::parse(s).unwrap()
+    }
+
+    #[test]
+    fn parse_palette_stops_at_max() {
+        let specs: Vec<String> = (0..PALETTE_MAX + 8)
+            .map(|i| format!("#{i:02x}0000"))
+            .collect();
+        let got = parse_palette(&specs);
+        assert_eq!(got.len(), PALETTE_MAX);
+        assert_eq!(got[0], hex("#000000"));
+        assert_eq!(got[PALETTE_MAX - 1], hex(&format!("#{:02x}0000", PALETTE_MAX - 1)));
+    }
+
+    #[test]
+    fn adopt_reuses_existing_and_refuses_past_max() {
+        let mut palette = vec![hex("#ff0000")];
+        assert_eq!(try_adopt_color(&mut palette, hex("#ff0000")), Some(0));
+        assert_eq!(palette.len(), 1);
+
+        let extra = hex("#00ff00");
+        assert_eq!(try_adopt_color(&mut palette, extra), Some(1));
+        assert_eq!(palette.len(), 2);
+
+        palette = (0..PALETTE_MAX)
+            .map(|i| hex(&format!("#{i:02x}0000")))
+            .collect();
+        assert_eq!(try_adopt_color(&mut palette, hex("#00ff00")), None);
+        assert_eq!(palette.len(), PALETTE_MAX);
+    }
+}

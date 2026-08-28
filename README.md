@@ -35,35 +35,61 @@ XWayland. Fractional scale (e.g. 1.6) renders pixel-crisp via
 
 ## Install
 
-```sh
-# Arch (PKGBUILD in this repo)
-makepkg -si
+Arch has a `PKGBUILD` in this repo (`makepkg -si`). Everywhere else, cargo
+is the install path. rustc 1.92 or newer.
 
-# or plain cargo
+```sh
+# Debian / Ubuntu build deps
+sudo apt install pkg-config libcairo2-dev libwayland-dev libxkbcommon-dev
+
 cargo build --release
 install -Dm755 target/release/annotate-linux ~/.local/bin/annotate-linux
 ```
 
-Runtime deps: `cairo`, `libxkbcommon`, `wayland`. A compositor speaking
-`zwlr_layer_shell_v1` is required (GNOME is not).
+Runtime deps: `cairo`, `libxkbcommon`, `wayland`. You need a compositor
+that speaks `zwlr_layer_shell_v1` (Hyprland, Sway, river, niri, labwc,
+Wayfire). GNOME and X11 are out.
 
-## Hyprland setup
+## Compositor setup
+
+Wayland has no global-hotkey API. Bind a key in the compositor to the
+`annotate-linux` CLI. The CLI talks to the daemon socket. The daemon
+starts on first command if it is not already running. The passthrough
+bind is also the way back out of passthrough. The overlay takes no input
+in that mode.
+
+### Hyprland
 
 ```conf
-exec-once = annotate-linux daemon        # optional: CLI autostarts it
+exec-once = annotate-linux daemon
 bind = SUPER,       A, exec, annotate-linux toggle
 bind = SUPER SHIFT, A, exec, annotate-linux passthrough
 bind = SUPER CTRL,  A, exec, annotate-linux clear
 layerrule = no_anim on, match:namespace annotate-linux
 ```
 
-(Hyprland older than 0.53 uses the previous rule syntax:
-`layerrule = noanim, annotate-linux`.)
+Hyprland older than 0.53 uses `layerrule = noanim, annotate-linux`.
 
-Wayland has no global-hotkey API, so activation goes through your
-compositor's binds → the `annotate-linux` CLI → the daemon's socket. The
-passthrough bind doubles as the way back out of passthrough (the overlay
-takes no input in that mode by design).
+### Sway
+
+```
+exec annotate-linux daemon
+bindsym $mod+a exec annotate-linux toggle
+bindsym $mod+Shift+a exec annotate-linux passthrough
+bindsym $mod+Ctrl+a exec annotate-linux clear
+```
+
+### niri
+
+```kdl
+spawn-at-startup "annotate-linux" "daemon"
+
+binds {
+    Mod+A { spawn "annotate-linux" "toggle"; }
+    Mod+Shift+A { spawn "annotate-linux" "passthrough"; }
+    Mod+Ctrl+A { spawn "annotate-linux" "clear"; }
+}
+```
 
 ## Keys (while the overlay is up)
 
