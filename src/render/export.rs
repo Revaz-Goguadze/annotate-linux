@@ -1,6 +1,7 @@
 //! Render a scene to a PNG file (transparent background unless a board is
 //! active) at full device resolution.
 
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -29,9 +30,48 @@ pub fn export_png(
             paint_object(&cr, obj, 1.0);
         }
     }
-    let mut file = std::fs::File::create(path)
+    // Screen captures are private. OpenOptions.mode is only used when the
+    // path is created; an existing world-readable file would keep those
+    // bits across truncate. fchmod the opened fd so both cases are 0600.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
         .with_context(|| format!("creating {}", path.display()))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting permissions on {}", path.display()))?;
     surf.write_to_png(&mut file)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_tightens_existing_world_readable_file_to_0600() {
+        let path = std::env::temp_dir().join(format!(
+            "annotate-export-perm-{}-{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        let result = export_png(&path, (8, 8), 1.0, BoardKind::None, 1.0, &Scene::new());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_file(&path);
+        result.unwrap();
+        assert_eq!(mode, 0o600);
+    }
 }

@@ -50,9 +50,12 @@ fn main() -> Result<()> {
         Cmd::Copy => {
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
+                .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            let tmp = std::env::temp_dir().join(format!("annotate-copy-{ts}.png"));
+            // Owner-only runtime dir, not /tmp: the intermediate PNG holds
+            // screen content, and a predictable /tmp path is plantable.
+            let tmp = annotate_linux::util::xdg::runtime_dir()?
+                .join(format!("copy-{}-{ts}.png", std::process::id()));
             request_export(&tmp)?;
             let file = std::fs::File::open(&tmp)?;
             let status = std::process::Command::new("wl-copy")
