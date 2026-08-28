@@ -320,3 +320,153 @@ impl AppState {
             debug_damage: crate::util::env::flag("ANNOTATE_DEBUG_DAMAGE"),
         })
     }
+
+    fn current_style(&self) -> Style {
+        let highlighter = self.input.tool == Tool::Highlighter;
+        Style {
+            stroke: self.palette[self.color_idx],
+            width: if highlighter { self.width * HIGHLIGHTER_WIDTH_FACTOR } else { self.width },
+            group_alpha: if highlighter { self.config.appearance.highlighter_alpha } else { 1.0 },
+        }
+    }
+
+    fn keyboard_interactivity(&self) -> KeyboardInteractivity {
+        match self.config.general.keyboard_interactivity.as_str() {
+            "on-demand" => KeyboardInteractivity::OnDemand,
+            _ => KeyboardInteractivity::Exclusive,
+        }
+    }
+
+    fn create_overlay_for(&mut self, output: &wl_output::WlOutput) -> Result<()> {
+        let key = output_key(output);
+        if self.overlays.contains_key(&key) {
+            return Ok(());
+        }
+        let name = self.output_state.info(output).and_then(|i| i.name);
+        let overlay = Overlay::create(
+            &self.compositor_state,
+            &self.layer_shell,
+            &self.shm,
+            &self.scaling,
+            &self.qh,
+            output,
+            key,
+            &self.config.general.namespace,
+            self.keyboard_interactivity(),
+        )?;
+        self.scenes.entry(key as u64).or_default();
+        self.overlays.insert(key, OverlayOutput { output: output.clone(), name, overlay });
+        Ok(())
+    }
+
+    pub fn show(&mut self) -> Result<()> {
+        if self.mode == Mode::Interactive {
+            return Ok(());
+        }
+        let outputs: Vec<_> = self.output_state.outputs().collect();
+        anyhow::ensure!(!outputs.is_empty(), "no outputs available");
+        for output in &outputs {
+            self.create_overlay_for(output)?;
+        }
+        self.mode = Mode::Interactive;
+        log::info!("overlay shown on {} output(s)", self.overlays.len());
+        Ok(())
+    }
+
+    /// Destroying the surfaces (not hiding them) guarantees the keyboard
+    /// grab is released and costs the compositor nothing while hidden.
+    /// Scenes persist unless auto-clear is on.
+    pub fn hide(&mut self) {
+        self.commit_text_draft();
+        self.obj_move = None;
+        self.last_click = None;
+        self.selection = None;
+        self.marquee = None;
+        self.erase = None;
+        if !self.overlays.is_empty() {
+            self.overlays.clear();
+            log::info!("overlay hidden");
+        }
+        self.input.drag = crate::input::Drag::Idle;
+        self.active_drag = None;
+        if self.config.general.auto_clear_on_toggle {
+            self.scenes.values_mut().for_each(|s| *s = Scene::new());
+            self.undo.clear();
+        }
+        self.mode = Mode::Hidden;
+    }
+
+    pub fn toggle(&mut self) -> Result<()> {
+        match self.mode {
+            Mode::Hidden => self.show(),
+            Mode::Interactive | Mode::Passthrough => {
+                self.hide();
+                Ok(())
+            }
+        }
+    }
+
+    pub fn on_preferred_scale(&mut self, key: u32, scale: f64) {
+        if let Some(oo) = self.overlays.get_mut(&key) {
+            oo.overlay.set_scale(scale);
+        }
+    }
+
+    fn damage_all(&mut self) {
+        for oo in self.overlays.values_mut() {
+            oo.overlay.damage.invalidate_all();
+            oo.overlay.dirty = true;
+        }
+    }
+
+    fn damage_key(&mut self, key: u32) {
+        if let Some(oo) = self.overlays.get_mut(&key) {
+            oo.overlay.damage.invalidate_all();
+            oo.overlay.dirty = true;
+        }
+    }
+
+    fn record_damage(&mut self, key: u32, rects: &[Rect]) {
+        log::trace!("record key={key} rects={rects:?}");
+        if let Some(oo) = self.overlays.get_mut(&key) {
+            for r in rects {
+                oo.overlay.damage.record(*r);
+            }
+            if !rects.is_empty() {
+                oo.overlay.dirty = true;
+            }
+        }
+    }
+
+    fn apply_drag_update(&mut self, key: u32, update: DragUpdate) {
+        log::trace!("drag={:?} damage={:?}", std::mem::discriminant(&self.input.drag), update.damage);
+        self.record_damage(key, &update.damage);
+        if let Some(kind) = update.committed {
+            let style = self.current_style();
+            let scene = self.scenes.entry(key as u64).or_default();
+            let id = scene.alloc_id();
+            let obj = Object::new(id, kind, style);
+            let at = scene.len();
+            self.undo.commit(key as u64, Edit::Insert { at, obj }, scene);
+            self.ensure_fade_timer();
+        }
+    }
+
+    fn surface_key(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
+        self.overlays
+            .iter()
+            .find(|(_, oo)| oo.overlay.layer.wl_surface() == surface)
+            .map(|(k, _)| *k)
+    }
+
+    /// The output showing the toolbar: the one under the pointer, else any.
+    fn ui_output_key(&self) -> Option<u32> {
+        self.focused_output
+            .filter(|k| self.overlays.contains_key(k))
+            .or_else(|| self.overlays.keys().next().copied())
+    }
+
+    fn ui_layout_on(&self, key: u32) -> Option<ui::UiLayout> {
+        let oo = self.overlays.get(&key)?;
+        Some(ui::layout(oo.overlay.surface_rect(), self.palette.len(), &self.ui))
+    }
