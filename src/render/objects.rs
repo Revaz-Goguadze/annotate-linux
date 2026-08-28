@@ -83,6 +83,7 @@ fn paint_kind(cr: &cairo::Context, obj: &Object) {
     }
 }
 
+
 fn polyline(cr: &cairo::Context, pts: &[crate::model::geom::Point]) {
     let Some(first) = pts.first() else { return };
     cr.new_path();
@@ -92,5 +93,134 @@ fn polyline(cr: &cairo::Context, pts: &[crate::model::geom::Point]) {
     }
     for p in &pts[1..] {
         cr.line_to(p.x, p.y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::geom::{Point, Rect};
+    use crate::model::object::{ObjectId, Style};
+    use crate::render::test_surface::Canvas;
+    use crate::util::color::Rgba;
+
+    fn style(width: f64, group_alpha: f64) -> Style {
+        Style { stroke: Rgba::new(1.0, 0.0, 0.0, 1.0), width, group_alpha }
+    }
+
+    fn obj(kind: ObjectKind, width: f64) -> Object {
+        Object::new(ObjectId(1), kind, style(width, 1.0))
+    }
+
+    /// Paint one object on a 100x100 canvas and report the inked pixels.
+    fn ink_of(kind: ObjectKind, width: f64, alpha: f64) -> usize {
+        let o = obj(kind, width);
+        let mut c = Canvas::new(100, 100);
+        c.paint(|cr| paint_object(cr, &o, alpha));
+        c.ink()
+    }
+
+    #[test]
+    fn every_kind_puts_ink_inside_its_own_bounds() {
+        let kinds = [
+            ObjectKind::Freehand { pts: vec![Point::new(10.0, 10.0), Point::new(80.0, 60.0)] },
+            ObjectKind::Line { a: Point::new(10.0, 10.0), b: Point::new(80.0, 80.0) },
+            ObjectKind::Arrow { a: Point::new(10.0, 50.0), b: Point::new(80.0, 50.0) },
+            ObjectKind::Rect { r: Rect::new(20.0, 20.0, 50.0, 40.0) },
+            ObjectKind::Ellipse { r: Rect::new(20.0, 20.0, 50.0, 40.0) },
+            ObjectKind::Counter { at: Point::new(50.0, 50.0), n: 7, r: 16.0 },
+            ObjectKind::Text { at: Point::new(10.0, 30.0), s: "hi".into(), px: 24.0 },
+        ];
+        for kind in kinds {
+            let o = obj(kind.clone(), 4.0);
+            let mut c = Canvas::new(100, 100);
+            c.paint(|cr| paint_object(cr, &o, 1.0));
+            let total = c.ink();
+            assert!(total > 0, "{kind:?} drew nothing");
+            let b = o.bounds;
+            let inside = c.ink_in(
+                b.x.floor().max(0.0) as i32,
+                b.y.floor().max(0.0) as i32,
+                b.w.ceil() as i32 + 1,
+                b.h.ceil() as i32 + 1,
+            );
+            assert_eq!(inside, total, "{kind:?} inked pixels outside its bounds {b:?}");
+        }
+    }
+
+    #[test]
+    fn nonpositive_alpha_skips_painting() {
+        let kind = ObjectKind::Line { a: Point::new(10.0, 10.0), b: Point::new(80.0, 80.0) };
+        assert_eq!(ink_of(kind.clone(), 4.0, 0.0), 0);
+        assert_eq!(ink_of(kind.clone(), 4.0, -1.0), 0);
+        assert!(ink_of(kind, 4.0, 1.0) > 0);
+    }
+
+    #[test]
+    fn fade_alpha_only_dims_the_stroke() {
+        let kind = ObjectKind::Line { a: Point::new(10.0, 50.0), b: Point::new(90.0, 50.0) };
+        let o = obj(kind, 6.0);
+
+        let mut opaque = Canvas::new(100, 100);
+        opaque.paint(|cr| paint_object(cr, &o, 1.0));
+        let mut faded = Canvas::new(100, 100);
+        faded.paint(|cr| paint_object(cr, &o, 0.25));
+
+        assert!(faded.alpha_at(50, 50) > 0);
+        assert!(
+            faded.alpha_at(50, 50) < opaque.alpha_at(50, 50),
+            "fade alpha must reduce coverage"
+        );
+    }
+
+    #[test]
+    fn highlighter_self_crossing_does_not_double_darken() {
+        // Group compositing means the crossing point is no more opaque than
+        // a single pass over the same stroke.
+        let o = Object::new(
+            ObjectId(1),
+            ObjectKind::Freehand {
+                pts: vec![
+                    Point::new(20.0, 20.0),
+                    Point::new(80.0, 80.0),
+                    Point::new(80.0, 20.0),
+                    Point::new(20.0, 80.0),
+                ],
+            },
+            style(12.0, 0.4),
+        );
+        let mut c = Canvas::new(100, 100);
+        c.paint(|cr| paint_object(cr, &o, 1.0));
+        let crossing = c.alpha_at(50, 50);
+        let single_pass = c.alpha_at(30, 30);
+        assert!(crossing > 0 && single_pass > 0);
+        assert!(
+            crossing <= single_pass + 2,
+            "crossing {crossing} darker than a single pass {single_pass}"
+        );
+    }
+
+    #[test]
+    fn degenerate_shapes_are_no_ops_not_panics() {
+        assert_eq!(ink_of(ObjectKind::Freehand { pts: vec![] }, 4.0, 1.0), 0);
+        assert_eq!(
+            ink_of(ObjectKind::Ellipse { r: Rect::new(20.0, 20.0, 0.0, 30.0) }, 4.0, 1.0),
+            0
+        );
+        assert_eq!(
+            ink_of(ObjectKind::Ellipse { r: Rect::new(20.0, 20.0, 30.0, -5.0) }, 4.0, 1.0),
+            0
+        );
+    }
+
+    #[test]
+    fn single_point_freehand_draws_a_dot() {
+        let kind = ObjectKind::Freehand { pts: vec![Point::new(50.0, 50.0)] };
+        let o = obj(kind, 10.0);
+        let mut c = Canvas::new(100, 100);
+        c.paint(|cr| paint_object(cr, &o, 1.0));
+        assert!(c.ink() > 0, "a tap must leave a round cap dot");
+        assert!(c.alpha_at(50, 50) > 0);
+        assert_eq!(c.alpha_at(90, 90), 0);
     }
 }

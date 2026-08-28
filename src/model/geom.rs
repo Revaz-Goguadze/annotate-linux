@@ -67,19 +67,6 @@ impl Rect {
         Rect::new(x0, y0, x1 - x0, y1 - y0)
     }
 
-    /// Smallest rect containing `self` and `p`. Unlike `union`, works even
-    /// though a bare point has zero area.
-    pub fn include_point(self, p: Point) -> Rect {
-        if self.is_empty() {
-            return Rect::new(p.x, p.y, 0.0, 0.0);
-        }
-        let x0 = self.x.min(p.x);
-        let y0 = self.y.min(p.y);
-        let x1 = (self.x + self.w).max(p.x);
-        let y1 = (self.y + self.h).max(p.y);
-        Rect::new(x0, y0, x1 - x0, y1 - y0)
-    }
-
     /// Grow by `m` on every side (negative shrinks; clamps at empty).
     pub fn inflate(self, m: f64) -> Rect {
         let w = (self.w + 2.0 * m).max(0.0);

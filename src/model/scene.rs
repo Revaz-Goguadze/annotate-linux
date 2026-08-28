@@ -29,3 +29,60 @@ impl Scene {
         self.objects.iter().position(|o| o.id == id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::geom::Rect;
+    use crate::model::object::{ObjectKind, Style};
+    use crate::util::color::Rgba;
+
+    fn obj(scene: &mut Scene, at: f64) -> ObjectId {
+        let id = scene.alloc_id();
+        scene.objects.push(Object::new(
+            id,
+            ObjectKind::Rect { r: Rect::new(at, at, 10.0, 10.0) },
+            Style { stroke: Rgba::new(1.0, 1.0, 1.0, 1.0), width: 2.0, group_alpha: 1.0 },
+        ));
+        id
+    }
+
+    #[test]
+    fn ids_are_unique_and_never_reused() {
+        let mut scene = Scene::new();
+        let ids: Vec<_> = (0..5).map(|_| scene.alloc_id()).collect();
+        assert_eq!(ids, (1..=5).map(ObjectId).collect::<Vec<_>>());
+        scene.objects.clear();
+        assert_eq!(scene.alloc_id(), ObjectId(6), "clearing must not recycle ids");
+    }
+
+    #[test]
+    fn len_and_is_empty_track_the_object_list() {
+        let mut scene = Scene::new();
+        assert!(scene.is_empty());
+        obj(&mut scene, 0.0);
+        obj(&mut scene, 20.0);
+        assert!(!scene.is_empty());
+        assert_eq!(scene.len(), 2);
+    }
+
+    #[test]
+    fn index_of_reports_z_order_and_none_for_removed_objects() {
+        let mut scene = Scene::new();
+        let a = obj(&mut scene, 0.0);
+        let b = obj(&mut scene, 20.0);
+        assert_eq!(scene.index_of(a), Some(0));
+        assert_eq!(scene.index_of(b), Some(1), "last pushed is topmost");
+        scene.objects.remove(0);
+        assert_eq!(scene.index_of(a), None);
+        assert_eq!(scene.index_of(b), Some(0));
+        assert_eq!(scene.index_of(ObjectId(999)), None);
+    }
+
+    #[test]
+    fn default_scene_is_empty() {
+        let scene = Scene::default();
+        assert!(scene.is_empty());
+        assert!(scene.index_of(ObjectId(1)).is_none());
+    }
+}

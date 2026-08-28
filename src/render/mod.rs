@@ -4,4 +4,6 @@ pub mod damage;
 pub mod export;
 pub mod objects;
 pub mod text;
+#[cfg(test)]
+pub mod test_surface;
 pub mod ui;

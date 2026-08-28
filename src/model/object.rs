@@ -185,6 +185,33 @@ mod tests {
     }
 
     #[test]
+    fn axis_aligned_arrow_bounds_contain_head_barbs() {
+        // Perfectly horizontal/vertical arrows have a zero-area a-b box; the
+        // barbs still stick out perpendicular to the shaft and must be inside
+        // the bounds (regression: the head fell outside its own damage rect).
+        for (a, b) in [
+            (Point::new(10.0, 50.0), Point::new(90.0, 50.0)),
+            (Point::new(90.0, 50.0), Point::new(10.0, 50.0)),
+            (Point::new(50.0, 10.0), Point::new(50.0, 90.0)),
+            (Point::new(50.0, 90.0), Point::new(50.0, 10.0)),
+        ] {
+            let o = Object::new(ObjectId(1), ObjectKind::Arrow { a, b }, style(6.0));
+            for p in crate::model::arrow::head_points(a, b, 6.0) {
+                assert!(o.bounds.contains(p), "barb {p:?} outside bounds {:?}", o.bounds);
+            }
+            assert!(o.bounds.contains(a) && o.bounds.contains(b));
+        }
+    }
+
+    #[test]
+    fn zero_length_arrow_has_bounds_around_its_point() {
+        let p = Point::new(40.0, 40.0);
+        let o = Object::new(ObjectId(1), ObjectKind::Arrow { a: p, b: p }, style(4.0));
+        assert!(o.bounds.contains(p));
+        assert!(o.bounds.w > 0.0 && o.bounds.h > 0.0);
+    }
+
+    #[test]
     fn translate_moves_bounds() {
         let mut o = Object::new(
             ObjectId(1),
@@ -204,14 +231,11 @@ fn bounds_of(kind: &ObjectKind, style: &Style) -> Rect {
         ObjectKind::Freehand { pts } => Rect::from_points(pts),
         ObjectKind::Line { a, b } => Rect::from_corners(*a, *b),
         ObjectKind::Arrow { a, b } => {
-            // NB: barbs must extend the bounds via include_point — a
-            // zero-sized rect is "empty" and union() would drop it, which
-            // left arrowheads outside their own damage bounds.
-            let mut r = Rect::from_corners(*a, *b);
-            for p in arrow::head_points(*a, *b, style.width) {
-                r = r.include_point(p);
-            }
-            r
+            // NB: the bbox must come from the endpoints *and* the barbs as
+            // bare points — folding zero-area rects together drops them
+            // (axis-aligned arrows lost their heads from the damage bounds).
+            let [tip, l, r] = arrow::head_points(*a, *b, style.width);
+            Rect::from_points(&[*a, *b, tip, l, r])
         }
         ObjectKind::Rect { r } | ObjectKind::Ellipse { r } => *r,
         ObjectKind::Counter { at, r, .. } => Rect::new(at.x - r, at.y - r, 2.0 * r, 2.0 * r),

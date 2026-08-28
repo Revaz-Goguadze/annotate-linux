@@ -102,3 +102,119 @@ impl Cmd {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn parse(args: &[&str]) -> Cmd {
+        Cli::try_parse_from(std::iter::once("annotate-linux").chain(args.iter().copied()))
+            .unwrap()
+            .command
+    }
+
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn simple_subcommands_map_to_their_wire_command() {
+        let cases = [
+            (vec!["toggle"], Command::Toggle),
+            (vec!["show"], Command::Show),
+            (vec!["hide"], Command::Hide),
+            (vec!["clear"], Command::Clear),
+            (vec!["undo"], Command::Undo),
+            (vec!["redo"], Command::Redo),
+            (vec!["counter-reset"], Command::CounterReset),
+            (vec!["status"], Command::Status),
+            (vec!["reload-config"], Command::ReloadConfig),
+            (vec!["quit"], Command::Quit),
+        ];
+        for (args, want) in cases {
+            assert_eq!(parse(&args).to_ipc(), Some(want), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn locally_handled_subcommands_have_no_wire_command() {
+        for args in [
+            vec!["daemon"],
+            vec!["copy"],
+            vec!["export"],
+            vec!["export", "/tmp/a.png"],
+            vec!["completions", "bash"],
+        ] {
+            assert_eq!(parse(&args).to_ipc(), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn passthrough_state_is_optional_and_anything_but_on_means_off() {
+        assert_eq!(parse(&["passthrough"]).to_ipc(), Some(Command::Passthrough { on: None }));
+        assert_eq!(
+            parse(&["passthrough", "on"]).to_ipc(),
+            Some(Command::Passthrough { on: Some(true) })
+        );
+        assert_eq!(
+            parse(&["passthrough", "off"]).to_ipc(),
+            Some(Command::Passthrough { on: Some(false) })
+        );
+    }
+
+    #[test]
+    fn value_subcommands_carry_their_arguments() {
+        assert_eq!(
+            parse(&["tool", "arrow"]).to_ipc(),
+            Some(Command::Tool { name: "arrow".into() })
+        );
+        assert_eq!(
+            parse(&["color", "#ff00ff"]).to_ipc(),
+            Some(Command::Color { value: "#ff00ff".into() })
+        );
+        assert_eq!(parse(&["width", "+2"]).to_ipc(), Some(Command::Width { value: "+2".into() }));
+        assert_eq!(
+            parse(&["board", "white", "--opacity", "0.5"]).to_ipc(),
+            Some(Command::Board { mode: Some("white".into()), opacity: Some(0.5) })
+        );
+        assert_eq!(
+            parse(&["board"]).to_ipc(),
+            Some(Command::Board { mode: None, opacity: None })
+        );
+        assert_eq!(
+            parse(&["cursor", "crosshair", "--highlight", "true"]).to_ipc(),
+            Some(Command::Cursor { style: Some("crosshair".into()), highlight: Some(true) })
+        );
+    }
+
+    #[test]
+    fn mode_maps_fade_only_for_the_fade_keyword() {
+        assert_eq!(
+            parse(&["mode", "fade", "--seconds", "2.5"]).to_ipc(),
+            Some(Command::Mode { fade: Some(true), seconds: Some(2.5) })
+        );
+        assert_eq!(
+            parse(&["mode", "persist"]).to_ipc(),
+            Some(Command::Mode { fade: Some(false), seconds: None })
+        );
+    }
+
+    #[test]
+    fn missing_or_unknown_arguments_are_rejected() {
+        for args in [
+            vec!["tool"],
+            vec!["color"],
+            vec!["nonsense"],
+            vec!["completions", "fish-shell"],
+            vec!["board", "white", "--opacity", "loud"],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("annotate-linux").chain(args.iter().copied()))
+                    .is_err(),
+                "{args:?} should not parse"
+            );
+        }
+    }
+}
