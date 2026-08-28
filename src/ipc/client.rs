@@ -23,17 +23,20 @@ pub fn send(cmd: &Command) -> Result<Response> {
 }
 
 /// Like [`send`], but spawns a detached daemon on connect failure and
-/// retries once after it binds the socket.
+/// retries once after it binds the socket. Only a failed connect means
+/// "no daemon" — errors from a live daemon (bad write, unparseable
+/// response) propagate instead of spawning a duplicate.
 pub fn send_or_autostart(cmd: &Command) -> Result<Response> {
-    if let Ok(resp) = send(cmd) {
-        return Ok(resp);
+    let path = socket_path()?;
+    match UnixStream::connect(&path) {
+        Ok(stream) => return send_on(stream, cmd),
+        Err(e) => log::debug!("connect to {} failed ({e}), autostarting the daemon", path.display()),
     }
     spawn_daemon().context("autostarting the daemon")?;
-    let path = socket_path()?;
     let deadline = Instant::now() + AUTOSTART_WAIT;
     while Instant::now() < deadline {
-        if UnixStream::connect(&path).is_ok() {
-            return send(cmd);
+        if let Ok(stream) = UnixStream::connect(&path) {
+            return send_on(stream, cmd);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
