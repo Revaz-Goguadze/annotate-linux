@@ -3,6 +3,7 @@
 
 use crate::model::arrow;
 use crate::model::object::{Object, ObjectKind};
+use crate::render::draw;
 
 /// `alpha` is an extra multiplier (fade mode); 1.0 = fully opaque.
 pub fn paint_object(cr: &cairo::Context, obj: &Object, alpha: f64) {
@@ -71,13 +72,8 @@ fn paint_kind(cr: &cairo::Context, obj: &Object) {
             if r.w <= 0.0 || r.h <= 0.0 {
                 return;
             }
-            cr.save().expect("save");
-            cr.translate(r.x + r.w / 2.0, r.y + r.h / 2.0);
-            cr.scale(r.w / 2.0, r.h / 2.0);
-            cr.new_path();
-            cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
-            cr.restore().expect("restore");
-            // stroke after restore so line width stays uniform
+            draw::ellipse(cr, r.x + r.w / 2.0, r.y + r.h / 2.0, r.w / 2.0, r.h / 2.0);
+            // stroke outside the scaled transform so line width stays uniform
             cr.stroke().expect("stroke");
         }
     }

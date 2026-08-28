@@ -21,38 +21,18 @@ pub enum Tool {
     Eraser,
 }
 
-impl Tool {
-    pub fn name(self) -> &'static str {
-        match self {
-            Tool::Pen => "pen",
-            Tool::Highlighter => "highlighter",
-            Tool::Line => "line",
-            Tool::Arrow => "arrow",
-            Tool::Rect => "rect",
-            Tool::Ellipse => "ellipse",
-            Tool::Counter => "counter",
-            Tool::Text => "text",
-            Tool::Select => "select",
-            Tool::Eraser => "eraser",
-        }
-    }
-
-    pub fn from_name(s: &str) -> Option<Self> {
-        Some(match s {
-            "pen" => Tool::Pen,
-            "highlighter" => Tool::Highlighter,
-            "line" => Tool::Line,
-            "arrow" => Tool::Arrow,
-            "rect" | "rectangle" => Tool::Rect,
-            "ellipse" | "circle" => Tool::Ellipse,
-            "counter" => Tool::Counter,
-            "text" => Tool::Text,
-            "select" => Tool::Select,
-            "eraser" => Tool::Eraser,
-            _ => return None,
-        })
-    }
-}
+crate::named_enum!(Tool {
+    Tool::Pen => "pen",
+    Tool::Highlighter => "highlighter",
+    Tool::Line => "line",
+    Tool::Arrow => "arrow",
+    Tool::Rect => "rect" | "rectangle",
+    Tool::Ellipse => "ellipse" | "circle",
+    Tool::Counter => "counter",
+    Tool::Text => "text",
+    Tool::Select => "select",
+    Tool::Eraser => "eraser",
+});
 
 /// Every verb the app understands. Keymap and IPC both funnel into this.
 #[derive(Clone, Debug, PartialEq)]

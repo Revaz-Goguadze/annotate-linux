@@ -6,17 +6,19 @@ use clap::Parser;
 use annotate_linux::cli::{Cli, Cmd};
 use annotate_linux::ipc;
 
+/// Unix seconds, for unique generated filenames.
+fn timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// Absolute output path for `export` (daemon has a different cwd).
 fn export_target(path: Option<&str>) -> Result<PathBuf> {
     let p = match path {
         Some(p) => PathBuf::from(p),
-        None => {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            PathBuf::from(format!("annotate-{ts}.png"))
-        }
+        None => PathBuf::from(format!("annotate-{}.png", timestamp())),
     };
     Ok(if p.is_absolute() { p } else { std::env::current_dir()?.join(p) })
 }

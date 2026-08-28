@@ -32,7 +32,7 @@ use wayland_client::{
 
 use super::outputs::{OverlayOutput, output_key};
 use super::scaling::ScalingState;
-use super::surface::{FrameCtx, Overlay};
+use super::surface::Overlay;
 use crate::config::keys::Keymap;
 use crate::config::state::RuntimeState;
 use crate::config::Config;
@@ -40,6 +40,7 @@ use crate::input::{Action, Drag, DragUpdate, InputState, Tool, text_edit};
 use crate::model::fade;
 use crate::render::board::BoardKind;
 use crate::render::cursor_fx::{CursorFx, CursorStyle};
+use crate::render::frame::FrameCtx;
 use crate::render::ui::{self, UiButton, UiHit, UiState, paint::UiPaintCtx};
 use crate::ipc::protocol::{Command, Response, StatusPayload};
 use crate::model::constraints::Mods;
@@ -296,7 +297,7 @@ impl AppState {
             loop_handle,
             keymap,
             state_timer: false,
-            debug_damage: std::env::var("ANNOTATE_DEBUG_DAMAGE").is_ok_and(|v| v == "1"),
+            debug_damage: crate::util::env::flag("ANNOTATE_DEBUG_DAMAGE"),
         })
     }
 
@@ -895,10 +896,7 @@ impl AppState {
         let Some((key, _)) = self.selection.clone() else { return };
         let idxs = self.selected_indices(key);
         let Some(scene) = self.scenes.get(&(key as u64)) else { return };
-        let mut r = Rect::default();
-        for i in idxs {
-            r = r.union(scene.objects[i].bounds);
-        }
+        let r = scene.bounds_union(idxs);
         self.record_damage(key, &[r.inflate(4.0)]);
     }
 
@@ -1012,10 +1010,7 @@ impl AppState {
             return;
         }
         let scene = self.scenes.entry(key as u64).or_default();
-        let mut damage = Rect::default();
-        for &i in &idxs {
-            damage = damage.union(scene.objects[i].bounds);
-        }
+        let damage = scene.bounds_union(idxs.iter().copied());
         let edit = Edit::Batch(idxs.iter().rev().map(|&at| Edit::Remove { at }).collect());
         self.undo.commit(key as u64, edit, scene);
         self.selection = None;

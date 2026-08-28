@@ -21,38 +21,10 @@ use super::buffer::with_cairo;
 use super::scaling::{FractionalScaleData, ScalingState};
 use super::state::AppState;
 use crate::model::geom::Rect;
-use crate::model::object::Object;
-use crate::model::scene::Scene;
-use crate::model::fade;
-use crate::render::board::{self, BoardKind};
-use crate::render::cursor_fx::{self, CursorFx};
 use crate::render::damage::DamageTracker;
-use crate::render::objects::paint_object;
-use crate::render::ui::{self, UiLayout, paint::UiPaintCtx};
-
-/// Everything one frame needs, borrowed from AppState.
-pub struct FrameCtx<'a> {
-    pub scene: &'a Scene,
-    pub preview: Option<&'a Object>,
-    pub board: BoardKind,
-    pub board_opacity: f64,
-    /// Draw an end-of-text caret on the preview (open text draft).
-    pub caret: bool,
-    /// Rubber-band rectangle in progress on this output.
-    pub marquee: Option<Rect>,
-    /// Bounds of selected objects on this output (dashed highlight).
-    pub selection: Vec<Rect>,
-    /// Fade-mode hold seconds; None = persist (full alpha).
-    pub fade_hold: Option<f64>,
-    pub now: std::time::Instant,
-    /// Cursor glyph/spotlight on this output.
-    pub cursor: Option<CursorFx>,
-    /// Click ripples on this output: (center, progress 0..1).
-    pub ripples: Vec<(crate::model::geom::Point, f64)>,
-    /// Present only on the output that shows the toolbar.
-    pub ui: Option<(&'a UiLayout, UiPaintCtx<'a>)>,
-    pub debug_damage: bool,
-}
+use crate::render::draw;
+use crate::render::frame::{self, FrameCtx};
+use crate::util::env;
 
 pub struct Overlay {
     pub layer: LayerSurface,
@@ -133,9 +105,9 @@ impl Overlay {
         layer.commit();
 
         let pool = SlotPool::new(4096, shm)?;
-        let perf = std::env::var("ANNOTATE_PERF").is_ok_and(|v| v == "1").then(Vec::new);
-        let force_full = std::env::var("ANNOTATE_FULL_DAMAGE").is_ok_and(|v| v == "1");
-        let check = std::env::var("ANNOTATE_CHECK").is_ok_and(|v| v == "1");
+        let perf = env::flag("ANNOTATE_PERF").then(Vec::new);
+        let force_full = env::flag("ANNOTATE_FULL_DAMAGE");
+        let check = env::flag("ANNOTATE_CHECK");
         Ok(Self {
             force_full,
             check,
@@ -258,78 +230,15 @@ impl Overlay {
         with_cairo(&mut *canvas, bw, bh, |cr| {
             // All drawing below happens in logical px.
             cr.scale(scale, scale);
-            for r in &rects {
-                cr.rectangle(r.x, r.y, r.w, r.h);
-            }
+            draw::add_rects(cr, rects.iter().copied());
             cr.clip();
-
-            // Slots are recycled and never zeroed — clear with Source or
-            // ghost strokes from previous frames survive.
-            cr.set_operator(cairo::Operator::Source);
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-            cr.paint().expect("clear");
-            cr.set_operator(cairo::Operator::Over);
-
-            board::paint(cr, ctx.board, ctx.board_opacity);
-
-            for obj in &ctx.scene.objects {
-                if rects.iter().any(|r| r.intersects(obj.bounds)) {
-                    let alpha = match ctx.fade_hold {
-                        Some(hold) => {
-                            fade::alpha(ctx.now.duration_since(obj.born).as_secs_f64(), hold)
-                        }
-                        None => 1.0,
-                    };
-                    paint_object(cr, obj, alpha);
-                }
-            }
-            if let Some(p) = ctx.preview {
-                if rects.iter().any(|r| r.intersects(p.bounds)) {
-                    paint_object(cr, p, 1.0);
-                    if ctx.caret {
-                        crate::render::text::paint_caret(cr, p);
-                    }
-                }
-            }
-
-            for (at, t) in &ctx.ripples {
-                if rects.iter().any(|r| r.intersects(cursor_fx::ripple_bounds(*at))) {
-                    cursor_fx::paint_ripple(cr, *at, *t, crate::util::color::Rgba::new(1.0, 0.85, 0.2, 1.0));
-                }
-            }
-            if let Some(fx) = &ctx.cursor {
-                if rects.iter().any(|r| r.intersects(fx.bounds())) {
-                    cursor_fx::paint_cursor(cr, fx);
-                }
-            }
-
-            // dashed chrome: selection highlights + marquee band
-            if !ctx.selection.is_empty() || ctx.marquee.is_some() {
-                cr.set_source_rgba(0.45, 0.65, 0.95, 0.95);
-                cr.set_line_width(1.5);
-                cr.set_dash(&[6.0, 4.0], 0.0);
-                for r in &ctx.selection {
-                    cr.rectangle(r.x, r.y, r.w, r.h);
-                }
-                if let Some(m) = &ctx.marquee {
-                    cr.rectangle(m.x, m.y, m.w, m.h);
-                }
-                cr.stroke().expect("dashed chrome");
-                cr.set_dash(&[], 0.0);
-            }
-
-            if let Some((layout, paint_ctx)) = &ctx.ui {
-                if rects.iter().any(|r| r.intersects(ui::ui_region(layout))) {
-                    ui::paint::paint(cr, layout, paint_ctx);
-                }
-            }
+            frame::clear(cr);
+            ctx.paint(cr, Some(&rects));
 
             if ctx.debug_damage {
                 cr.set_source_rgba(0.0, 1.0, 1.0, 0.9);
                 cr.set_line_width(1.0 / scale);
-                for r in &rects {
-                    cr.rectangle(r.x, r.y, r.w, r.h);
-                }
+                draw::add_rects(cr, rects.iter().copied());
                 cr.stroke().expect("debug rects");
             }
         })?;
@@ -340,40 +249,8 @@ impl Overlay {
             let mut reference = vec![0u8; (bw * bh * 4) as usize];
             with_cairo(&mut reference, bw, bh, |cr| {
                 cr.scale(scale, scale);
-                cr.set_operator(cairo::Operator::Source);
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.0);
-                cr.paint().expect("clear");
-                cr.set_operator(cairo::Operator::Over);
-                board::paint(cr, ctx.board, ctx.board_opacity);
-                for obj in &ctx.scene.objects {
-                    let alpha = match ctx.fade_hold {
-                        Some(hold) => fade::alpha(ctx.now.duration_since(obj.born).as_secs_f64(), hold),
-                        None => 1.0,
-                    };
-                    paint_object(cr, obj, alpha);
-                }
-                if let Some(p) = ctx.preview {
-                    paint_object(cr, p, 1.0);
-                    if ctx.caret {
-                        crate::render::text::paint_caret(cr, p);
-                    }
-                }
-                if !ctx.selection.is_empty() || ctx.marquee.is_some() {
-                    cr.set_source_rgba(0.45, 0.65, 0.95, 0.95);
-                    cr.set_line_width(1.5);
-                    cr.set_dash(&[6.0, 4.0], 0.0);
-                    for r in &ctx.selection {
-                        cr.rectangle(r.x, r.y, r.w, r.h);
-                    }
-                    if let Some(m) = &ctx.marquee {
-                        cr.rectangle(m.x, m.y, m.w, m.h);
-                    }
-                    cr.stroke().expect("dashed");
-                    cr.set_dash(&[], 0.0);
-                }
-                if let Some((layout, paint_ctx)) = &ctx.ui {
-                    ui::paint::paint(cr, layout, paint_ctx);
-                }
+                frame::clear(cr);
+                ctx.paint(cr, None);
             })?;
             // canvas was borrowed by the earlier with_cairo; re-fetch bytes via
             // a fresh comparison against the reference

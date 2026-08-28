@@ -4,10 +4,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::util::xdg;
+use crate::util::{toml_file, xdg};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(default)]
@@ -33,12 +33,12 @@ impl RuntimeState {
     /// Load, falling back to defaults on a missing or corrupt file.
     pub fn load() -> Self {
         let path = state_path();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|e| {
+        match toml_file::read_opt(&path) {
+            Ok(Some(text)) => toml::from_str(&text).unwrap_or_else(|e| {
                 log::warn!("corrupt state file {} ({e}), using defaults", path.display());
                 Self::default()
             }),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Ok(None) => Self::default(),
             Err(e) => {
                 log::warn!("cannot read state file {} ({e}), using defaults", path.display());
                 Self::default()
@@ -47,14 +47,7 @@ impl RuntimeState {
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = state_path();
-        let dir = path.parent().expect("state path has a parent");
-        std::fs::create_dir_all(dir)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, toml::to_string(self)?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path).with_context(|| format!("renaming into {}", path.display()))?;
-        Ok(())
+        toml_file::write_atomic(&state_path(), &toml::to_string(self)?)
     }
 }
 

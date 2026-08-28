@@ -1,6 +1,7 @@
 //! Cursor spotlight, click ripples, and drawn cursor glyphs.
 
 use crate::model::geom::{Point, Rect};
+use crate::render::draw;
 use crate::util::color::Rgba;
 
 pub const RIPPLE_MAX_R: f64 = 36.0;
@@ -17,28 +18,15 @@ pub enum CursorStyle {
     Crosshair,
 }
 
+crate::named_enum!(CursorStyle {
+    CursorStyle::Default => "default",
+    CursorStyle::None => "none",
+    CursorStyle::Outline => "outline",
+    CursorStyle::Circle => "circle",
+    CursorStyle::Crosshair => "crosshair",
+});
+
 impl CursorStyle {
-    pub fn from_name(s: &str) -> Option<Self> {
-        Some(match s {
-            "default" => CursorStyle::Default,
-            "none" => CursorStyle::None,
-            "outline" => CursorStyle::Outline,
-            "circle" => CursorStyle::Circle,
-            "crosshair" => CursorStyle::Crosshair,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            CursorStyle::Default => "default",
-            CursorStyle::None => "none",
-            CursorStyle::Outline => "outline",
-            CursorStyle::Circle => "circle",
-            CursorStyle::Crosshair => "crosshair",
-        }
-    }
-
     /// Styles that replace the system cursor with a drawn glyph.
     pub fn hides_system_cursor(self) -> bool {
         self != CursorStyle::Default
@@ -65,8 +53,7 @@ pub fn paint_cursor(cr: &cairo::Context, fx: &CursorFx) {
     let p = fx.pos;
     if fx.highlight {
         cr.set_source_rgba(1.0, 0.85, 0.2, 0.35);
-        cr.new_path();
-        cr.arc(p.x, p.y, fx.highlight_radius, 0.0, std::f64::consts::TAU);
+        draw::circle(cr, p.x, p.y, fx.highlight_radius);
         cr.fill().expect("highlight");
     }
     let c = fx.color;
@@ -75,13 +62,11 @@ pub fn paint_cursor(cr: &cairo::Context, fx: &CursorFx) {
     match fx.style {
         CursorStyle::Default | CursorStyle::None => {}
         CursorStyle::Outline => {
-            cr.new_path();
-            cr.arc(p.x, p.y, 8.0, 0.0, std::f64::consts::TAU);
+            draw::circle(cr, p.x, p.y, 8.0);
             cr.stroke().expect("outline");
         }
         CursorStyle::Circle => {
-            cr.new_path();
-            cr.arc(p.x, p.y, 5.0, 0.0, std::f64::consts::TAU);
+            draw::circle(cr, p.x, p.y, 5.0);
             cr.fill().expect("dot");
         }
         CursorStyle::Crosshair => {
@@ -100,8 +85,7 @@ pub fn paint_ripple(cr: &cairo::Context, at: Point, t: f64, color: Rgba) {
     let r = 6.0 + t * (RIPPLE_MAX_R - 6.0);
     cr.set_source_rgba(color.r, color.g, color.b, (1.0 - t) * 0.6);
     cr.set_line_width(3.0);
-    cr.new_path();
-    cr.arc(at.x, at.y, r, 0.0, std::f64::consts::TAU);
+    draw::circle(cr, at.x, at.y, r);
     cr.stroke().expect("ripple");
 }
 

@@ -5,6 +5,7 @@ use super::{UiButton, UiLayout, track_x_from_width};
 use crate::input::Tool;
 use crate::model::geom::Rect;
 use crate::render::board::BoardKind;
+use crate::render::draw;
 use crate::util::color::Rgba;
 
 pub struct UiPaintCtx<'a> {
@@ -24,7 +25,7 @@ pub fn paint(cr: &cairo::Context, l: &UiLayout, ctx: &UiPaintCtx) {
     for (b, r) in &l.buttons {
         let active = matches!(b, UiButton::Tool(t) if *t == ctx.active_tool);
         if active {
-            rounded(cr, r.inflate(-2.0), 6.0);
+            draw::rounded_rect(cr, r.inflate(-2.0), 6.0);
             cr.set_source_rgba(BTN_ACTIVE.0, BTN_ACTIVE.1, BTN_ACTIVE.2, BTN_ACTIVE.3);
             cr.fill().expect("active bg");
         }
@@ -35,11 +36,11 @@ pub fn paint(cr: &cairo::Context, l: &UiLayout, ctx: &UiPaintCtx) {
         panel(cr, *p);
         for (i, r) in swatches.iter().enumerate() {
             let c = ctx.palette[i];
-            rounded(cr, *r, 5.0);
+            draw::rounded_rect(cr, *r, 5.0);
             cr.set_source_rgba(c.r, c.g, c.b, c.a);
             cr.fill().expect("swatch");
             if i == ctx.color_idx {
-                rounded(cr, r.inflate(2.0), 6.0);
+                draw::rounded_rect(cr, r.inflate(2.0), 6.0);
                 cr.set_source_rgb(FG.0, FG.1, FG.2);
                 cr.set_line_width(2.0);
                 cr.stroke().expect("swatch ring");
@@ -63,27 +64,16 @@ pub fn paint(cr: &cairo::Context, l: &UiLayout, ctx: &UiPaintCtx) {
         let kr = 4.0 + ctx.width / 2.0;
         let c = ctx.palette[ctx.color_idx];
         cr.set_source_rgba(c.r, c.g, c.b, 1.0);
-        cr.new_path();
-        cr.arc(kx, cy, kr, 0.0, std::f64::consts::TAU);
+        draw::circle(cr, kx, cy, kr);
         cr.fill().expect("knob");
     }
 }
 
 
 fn panel(cr: &cairo::Context, r: Rect) {
-    rounded(cr, r, 10.0);
+    draw::rounded_rect(cr, r, 10.0);
     cr.set_source_rgba(BG.0, BG.1, BG.2, BG.3);
     cr.fill().expect("panel");
-}
-
-fn rounded(cr: &cairo::Context, r: Rect, rad: f64) {
-    let rad = rad.min(r.w / 2.0).min(r.h / 2.0);
-    cr.new_path();
-    cr.arc(r.x + r.w - rad, r.y + rad, rad, -std::f64::consts::FRAC_PI_2, 0.0);
-    cr.arc(r.x + r.w - rad, r.y + r.h - rad, rad, 0.0, std::f64::consts::FRAC_PI_2);
-    cr.arc(r.x + rad, r.y + r.h - rad, rad, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
-    cr.arc(r.x + rad, r.y + rad, rad, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
-    cr.close_path();
 }
 
 fn icon(cr: &cairo::Context, b: UiButton, r: Rect, ctx: &UiPaintCtx) {
@@ -127,30 +117,19 @@ fn icon(cr: &cairo::Context, b: UiButton, r: Rect, ctx: &UiPaintCtx) {
         }
         UiButton::Tool(Tool::Ellipse) => {
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            cr.save().unwrap();
-            cr.translate(cx, cy);
-            cr.scale((x1 - x0) / 2.0, (y1 - y0) / 2.0 - 2.0);
-            cr.arc(0.0, 0.0, 1.0, 0.0, std::f64::consts::TAU);
-            cr.restore().unwrap();
+            draw::ellipse(cr, cx, cy, (x1 - x0) / 2.0, (y1 - y0) / 2.0 - 2.0);
             cr.stroke().unwrap();
         }
         UiButton::Tool(Tool::Counter) => {
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
             cr.arc(cx, cy, (x1 - x0) / 2.0, 0.0, std::f64::consts::TAU);
             cr.stroke().unwrap();
-            cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-            cr.set_font_size(12.0);
-            let ext = cr.text_extents("1").unwrap();
-            cr.move_to(cx - ext.width() / 2.0 - ext.x_bearing(), cy + ext.height() / 2.0);
-            cr.show_text("1").unwrap();
+            draw::select_font(cr, 12.0, cairo::FontWeight::Bold);
+            draw::centered_text(cr, cx, cy, "1");
         }
         UiButton::Tool(Tool::Text) => {
-            cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-            cr.set_font_size(16.0);
-            let ext = cr.text_extents("T").unwrap();
-            let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            cr.move_to(cx - ext.width() / 2.0 - ext.x_bearing(), cy + ext.height() / 2.0);
-            cr.show_text("T").unwrap();
+            draw::select_font(cr, 16.0, cairo::FontWeight::Bold);
+            draw::centered_text(cr, (x0 + x1) / 2.0, (y0 + y1) / 2.0, "T");
         }
         UiButton::Tool(Tool::Select) => {
             // cursor-arrow glyph
