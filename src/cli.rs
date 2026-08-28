@@ -2,6 +2,14 @@ use clap::{Parser, Subcommand};
 
 use crate::ipc::protocol::Command;
 
+/// Reject NaN/inf at the CLI boundary: `serde_json` encodes a non-finite
+/// f64 as `null`, which reaches the daemon as an absent optional field and
+/// is silently dropped instead of rejected.
+fn finite_f64(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|e| format!("{e}"))?;
+    if v.is_finite() { Ok(v) } else { Err(format!("{s} is not a finite number")) }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "annotate-linux", version, about = "Screen annotation overlay for wlr-layer-shell compositors")]
 pub struct Cli {
@@ -30,11 +38,14 @@ pub enum Cmd {
     /// Set stroke color: #rrggbb, next, prev, or palette index
     Color { value: String },
     /// Set stroke width: absolute (e.g. 8), or relative (+1, -1)
-    Width { value: String },
+    Width {
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+    },
     /// Set board background: none|white|black
     Board {
         mode: Option<String>,
-        #[arg(long)]
+        #[arg(long, value_parser = finite_f64)]
         opacity: Option<f64>,
     },
     /// Reset the counter tool sequence to 1
@@ -42,7 +53,7 @@ pub enum Cmd {
     /// Set annotation lifetime mode: fade|persist
     Mode {
         mode: String,
-        #[arg(long)]
+        #[arg(long, value_parser = finite_f64)]
         seconds: Option<f64>,
     },
     /// Set cursor style: none|outline|circle|crosshair
@@ -175,6 +186,7 @@ mod tests {
             Some(Command::Color { value: "#ff00ff".into() })
         );
         assert_eq!(parse(&["width", "+2"]).to_ipc(), Some(Command::Width { value: "+2".into() }));
+        assert_eq!(parse(&["width", "-3"]).to_ipc(), Some(Command::Width { value: "-3".into() }));
         assert_eq!(
             parse(&["board", "white", "--opacity", "0.5"]).to_ipc(),
             Some(Command::Board { mode: Some("white".into()), opacity: Some(0.5) })
@@ -209,6 +221,11 @@ mod tests {
             vec!["nonsense"],
             vec!["completions", "fish-shell"],
             vec!["board", "white", "--opacity", "loud"],
+            // Non-finite floats would serialize to JSON null and be dropped.
+            vec!["board", "white", "--opacity", "inf"],
+            vec!["mode", "fade", "--seconds", "inf"],
+            vec!["mode", "fade", "--seconds", "NaN"],
+            vec!["mode", "fade", "--seconds", "-inf"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("annotate-linux").chain(args.iter().copied()))
