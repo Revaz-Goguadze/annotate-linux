@@ -205,3 +205,118 @@ pub struct AppState {
     state_timer: bool,
     debug_damage: bool,
 }
+
+impl AppState {
+    pub fn new(
+        globals: &GlobalList,
+        qh: &QueueHandle<AppState>,
+        loop_signal: LoopSignal,
+        loop_handle: LoopHandle<'static, AppState>,
+        config: Config,
+    ) -> Result<Self> {
+        let palette = parse_palette(&config.appearance.palette);
+        let palette = if palette.is_empty() {
+            if !config.appearance.palette.is_empty() {
+                log::warn!("config: no valid palette colors, using fallback red");
+            }
+            vec![Rgba::new(0.9, 0.2, 0.2, 1.0)]
+        } else {
+            palette
+        };
+        let board_opacity = config.appearance.board_opacity.clamp(0.1, 1.0);
+        let keymap = Keymap::with_overrides(&config.keys)?;
+        let cursor_style = cursor_style_or_default(&config.cursor.style);
+        let cursor_highlight = config.cursor.highlight;
+
+        // Restore last session's tool/color/width/board/fade.
+        let saved = RuntimeState::load();
+        // Restoring a non-drawing tool reads as "drawing is broken" after a
+        // restart — those start back on the pen.
+        let tool = match Tool::from_name(&saved.tool) {
+            Some(Tool::Eraser) | Some(Tool::Select) => Tool::Pen,
+            None => {
+                log::warn!("state: unknown saved tool {:?}, starting on pen", saved.tool);
+                Tool::Pen
+            }
+            Some(t) => t,
+        };
+        let mut palette = palette;
+        let color_idx = if saved.color.is_empty() {
+            0
+        } else {
+            match Rgba::parse(&saved.color) {
+                Ok(c) => try_adopt_color(&mut palette, c).unwrap_or_else(|| {
+                    log::warn!(
+                        "state: saved color {:?} dropped, palette is full ({PALETTE_MAX})",
+                        saved.color
+                    );
+                    0
+                }),
+                Err(e) => {
+                    log::warn!("state: invalid saved color {:?} ({e}), using palette default", saved.color);
+                    0
+                }
+            }
+        };
+        let width = if saved.width > 0.0 {
+            saved.width.clamp(WIDTH_MIN, WIDTH_MAX)
+        } else {
+            config.appearance.default_width
+        };
+        let board = BoardKind::from_name(&saved.board).unwrap_or_else(|| {
+            log::warn!("state: unknown saved board {:?}, using none", saved.board);
+            BoardKind::None
+        });
+        let fade_enabled = saved.fade || config.general.fade_default;
+        let fade_seconds = config.general.fade_seconds;
+        Ok(Self {
+            registry_state: RegistryState::new(globals),
+            seat_state: SeatState::new(globals, qh),
+            output_state: OutputState::new(globals, qh),
+            compositor_state: CompositorState::bind(globals, qh)
+                .map_err(|e| anyhow::anyhow!("wl_compositor unavailable: {e}"))?,
+            layer_shell: LayerShell::bind(globals, qh).map_err(|e| {
+                anyhow::anyhow!("zwlr_layer_shell_v1 unavailable (compositor without wlr-layer-shell?): {e}")
+            })?,
+            shm: Shm::bind(globals, qh).map_err(|e| anyhow::anyhow!("wl_shm unavailable: {e}"))?,
+            scaling: ScalingState::bind(globals, qh),
+            qh: qh.clone(),
+            loop_signal,
+            keyboard: None,
+            pointer: None,
+            width,
+            config,
+            mode: Mode::Hidden,
+            overlays: HashMap::new(),
+            scenes: HashMap::new(),
+            active_drag: None,
+            undo: UndoStack::default(),
+            input: InputState { tool, ..Default::default() },
+            palette,
+            color_idx,
+            ui: UiState::default(),
+            board,
+            board_opacity,
+            focused_output: None,
+            counter_next: 1,
+            text_draft: None,
+            obj_move: None,
+            last_click: None,
+            selection: None,
+            clipboard: Vec::new(),
+            marquee: None,
+            erase: None,
+            fade_enabled,
+            fade_seconds,
+            fade_timer: false,
+            cursor_style,
+            cursor_highlight,
+            pointer_pos: None,
+            ripples: Vec::new(),
+            fx_timer: false,
+            loop_handle,
+            keymap,
+            state_timer: false,
+            debug_damage: crate::util::env::flag("ANNOTATE_DEBUG_DAMAGE"),
+        })
+    }
