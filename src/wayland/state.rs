@@ -58,3 +58,14 @@ const WIDTH_MAX: f64 = 20.0;
 const PALETTE_MAX: usize = 64;
 /// Highlighter strokes are drawn thicker than the pen at the same setting.
 const HIGHLIGHTER_WIDTH_FACTOR: f64 = 3.0;
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Hidden,
+    Interactive,
+    /// Always-on: annotations visible, all input passes through.
+    Passthrough,
+}
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+const TICK: Duration = Duration::from_millis(33);
