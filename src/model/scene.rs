@@ -57,6 +57,16 @@ mod tests {
         scene
     }
 
+    fn obj(scene: &mut Scene, at: f64) -> ObjectId {
+        let id = scene.alloc_id();
+        scene.objects.push(Object::new(
+            id,
+            ObjectKind::Rect { r: Rect::new(at, at, 10.0, 10.0) },
+            Style { stroke: Rgba::new(1.0, 1.0, 1.0, 1.0), width: 2.0, group_alpha: 1.0 },
+        ));
+        id
+    }
+
     #[test]
     fn bounds_union_covers_listed_objects_only() {
         let scene = scene_with_rects(&[Rect::new(0.0, 0.0, 10.0, 10.0), Rect::new(100.0, 0.0, 10.0, 10.0)]);
@@ -66,24 +76,6 @@ mod tests {
         let both = scene.bounds_union([0, 1, 9]);
         assert!(both.contains(Point::new(105.0, 5.0)));
         assert_eq!(scene.bounds_union([]), Rect::default());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::geom::Rect;
-    use crate::model::object::{ObjectKind, Style};
-    use crate::util::color::Rgba;
-
-    fn obj(scene: &mut Scene, at: f64) -> ObjectId {
-        let id = scene.alloc_id();
-        scene.objects.push(Object::new(
-            id,
-            ObjectKind::Rect { r: Rect::new(at, at, 10.0, 10.0) },
-            Style { stroke: Rgba::new(1.0, 1.0, 1.0, 1.0), width: 2.0, group_alpha: 1.0 },
-        ));
-        id
     }
 
     #[test]
